@@ -34,7 +34,7 @@ RESOLUTION: Tuple[int, int] = (1280, 720)
 
 MODEL_PATH = Path("solution/detection/model/best.pt")
 CONFIDENCE_THRESHOLD = 0.5
-CLASS_NAMES: List[str] = ["bucket", "arm_joint", "boom", "truck"]
+CLASS_NAMES: List[str] = ["arm_joint", "boom", "bucket", "truck"]
 
 # ---------------------------------------------------------------------------
 # Stereo Vision
@@ -71,8 +71,8 @@ class IMUConfig:
     gyro_bandpass_high_hz: float = 2.0
     sample_rate_hz: float = 15.0
 
-    peak_min_distance_samples: int = 30  # ~2 sec between swing peaks
-    peak_min_prominence: float = 1.5  # gyro magnitude prominence
+    peak_min_distance_samples: int = 300  # ~20 sec between swing peaks (real cycles 30-60s)
+    peak_min_prominence: float = 0.8  # gyro magnitude prominence (lowered for bandpass signal)
 
 
 IMU_CONFIG = IMUConfig()
@@ -90,11 +90,35 @@ class CycleFSMConfig:
     dig_min_arm_curl_rate_deg_s: float = 3.0
     swing_min_gyro_magnitude: float = 1.0
     dump_bucket_tilt_threshold_deg: float = 120.0
-    min_phase_duration_sec: float = 1.0
+    min_phase_duration_sec: float = 2.0
     max_cycle_duration_sec: float = 120.0
+    min_cycle_duration_sec: float = 15.0
+    max_phase_duration_sec: float = 25.0
+    angle_smoothing_window: int = 5
 
 
 CYCLE_FSM_CONFIG = CycleFSMConfig()
+
+# ---------------------------------------------------------------------------
+# Bucket-Position Phase Detection (simple CV rules)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class BucketPhaseConfig:
+    """Phase detection based on bucket Y-position, X-velocity, and truck presence."""
+
+    bucket_low_y: float = 350.0
+    bucket_high_y: float = 250.0
+    smoothing_window: int = 8
+    min_phase_frames: int = 15
+    x_velocity_threshold: float = 3.0
+    transport_x_velocity_threshold: float = 6.0
+    x_smoothing_window: int = 5
+    min_dump_duration_sec: float = 3.0
+    min_idle_duration_sec: float = 4.0
+
+
+BUCKET_PHASE_CONFIG = BucketPhaseConfig()
 
 # ---------------------------------------------------------------------------
 # Fusion
@@ -108,6 +132,7 @@ FUSION_TOLERANCE_SEC = 0.5  # max offset between IMU and video cycle events
 
 ANNOTATED_VIDEO_FILENAME = "annotated_video.mp4"
 METRICS_JSON_FILENAME = "metrics.json"
+DETECTIONS_CSV_FILENAME = "detections.csv"
 ANNOTATED_VIDEO_CODEC = "mp4v"
 
 # ---------------------------------------------------------------------------

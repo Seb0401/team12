@@ -1,10 +1,13 @@
 """Compute joint angles from YOLO detection positions."""
 
 import math
+from collections import deque
 from dataclasses import dataclass
 from typing import Optional
 
 from solution.detection.detector import FrameDetections
+
+_MAX_INTERPOLATION_GAP = 5
 
 
 @dataclass
@@ -16,6 +19,11 @@ class JointAngles:
     bucket_angle_deg: Optional[float] = None
     boom_angle_deg: Optional[float] = None
     valid: bool = False
+    interpolated: bool = False
+
+
+_last_valid_angles: Optional["JointAngles"] = None
+_frames_since_valid: int = 0
 
 
 def _angle_between_points(
@@ -67,14 +75,14 @@ def compute_joint_angles(detections: FrameDetections) -> JointAngles:
     """
     Compute shovel joint angles from detection bounding box centers.
 
-    Angles:
-    - arm_angle: angle at arm_joint between bucket and boom (0–180°)
-    - bucket_angle: angle of bucket from vertical relative to arm_joint
-    - boom_angle: angle of boom from vertical relative to arm_joint
+    Falls back to the last valid angles when detections are missing
+    for up to _MAX_INTERPOLATION_GAP consecutive frames.
 
     @param detections - Frame detections with bucket, arm_joint, boom
     @returns JointAngles with computed values (valid=True if all 3 detected)
     """
+    global _last_valid_angles, _frames_since_valid
+
     bucket_det = detections.get_by_class("bucket")
     arm_det = detections.get_by_class("arm_joint")
     boom_det = detections.get_by_class("boom")
@@ -82,6 +90,13 @@ def compute_joint_angles(detections: FrameDetections) -> JointAngles:
     angles = JointAngles(frame_idx=detections.frame_idx)
 
     if not all([bucket_det, arm_det, boom_det]):
+        _frames_since_valid += 1
+        if _last_valid_angles is not None and _frames_since_valid <= _MAX_INTERPOLATION_GAP:
+            angles.arm_angle_deg = _last_valid_angles.arm_angle_deg
+            angles.bucket_angle_deg = _last_valid_angles.bucket_angle_deg
+            angles.boom_angle_deg = _last_valid_angles.boom_angle_deg
+            angles.valid = True
+            angles.interpolated = True
         return angles
 
     p_bucket = bucket_det.center
@@ -93,4 +108,14 @@ def compute_joint_angles(detections: FrameDetections) -> JointAngles:
     angles.boom_angle_deg = _angle_from_vertical(p_boom, p_arm)
     angles.valid = True
 
+    _last_valid_angles = angles
+    _frames_since_valid = 0
+
     return angles
+
+
+def reset_interpolation_state() -> None:
+    """Reset the interpolation state between pipeline runs."""
+    global _last_valid_angles, _frames_since_valid
+    _last_valid_angles = None
+    _frames_since_valid = 0

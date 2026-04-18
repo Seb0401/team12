@@ -21,7 +21,7 @@ from solution.data.loader import (
     validate_inputs,
 )
 from solution.detection.detector import ShovelDetector, FrameDetections
-from solution.kinematics.joint_angles import compute_joint_angles, JointAngles
+from solution.kinematics.joint_angles import compute_joint_angles, JointAngles, reset_interpolation_state
 from solution.kinematics.cycle_detector import CycleFSM, Phase
 from solution.imu.processor import process_imu
 from solution.imu.cycle_detector import detect_swing_peaks, pair_swing_events
@@ -32,6 +32,7 @@ from solution.stereo.kinematics_3d import estimate_3d_kinematics
 from solution.productivity.metrics import compute_productivity
 from solution.productivity.recommendations import generate_recommendations
 from solution.output.annotator import VideoAnnotator
+from solution.output.csv_exporter import DetectionCSVWriter
 from solution.output.report import write_json_report
 from solution.utils.time_sync import align_imu_to_video
 
@@ -81,7 +82,11 @@ def run_pipeline() -> None:
     annotator = VideoAnnotator(fps=fps, resolution=(meta["width"], meta["height"]))
     annotator.open()
 
+    csv_writer = DetectionCSVWriter()
+    csv_writer.open()
+
     # ── Frame processing loop ──
+    reset_interpolation_state()
     logger.info("Processing %d frames...", total_frames)
     fill_volumes_per_cycle: List[Optional[float]] = []
     current_cycle_fills: List[float] = []
@@ -95,6 +100,7 @@ def run_pipeline() -> None:
             break
 
         detections = detector.detect(frame_left, frame_idx)
+        csv_writer.write_frame(detections, fps)
         angles = compute_joint_angles(detections)
         truck_visible = detections.get_by_class("truck") is not None
         phase = fsm.update(angles, truck_visible=truck_visible)
@@ -139,12 +145,13 @@ def run_pipeline() -> None:
     # ── Finalize ──
     fsm.finalize(total_frames - 1)
     annotator.close()
+    csv_writer.close()
     cap_left.release()
     cap_right.release()
 
     # ── Fuse cycles ──
     video_cycles = fsm.cycles
-    fused = fuse_cycles(video_cycles, imu_cycles)
+    fused = fuse_cycles(video_cycles, imu_cycles, video_duration_sec=duration_sec)
 
     # ── Compute productivity ──
     report = compute_productivity(fused, fill_volumes_per_cycle, duration_sec)

@@ -28,16 +28,18 @@ def fuse_cycles(
     video_cycles: List[Cycle],
     imu_cycles: List[IMUCycle],
     tolerance_sec: float = FUSION_TOLERANCE_SEC,
+    video_duration_sec: float = 0.0,
 ) -> List[FusedCycle]:
     """
     Merge video and IMU cycle detections into a unified timeline.
 
     Matching: video cycle start within ±tolerance of IMU swing_to_dump timestamp.
-    Unmatched cycles kept with source label.
+    Unmatched IMU cycles are only kept if they fall within the video time range.
 
     @param video_cycles - Cycles from FSM
     @param imu_cycles - Cycles from IMU gyro peaks
     @param tolerance_sec - Max time offset for matching
+    @param video_duration_sec - Total video duration for clipping IMU-only cycles
     @returns Merged list of FusedCycle, sorted by start time
     """
     matched_video: set[int] = set()
@@ -87,12 +89,26 @@ def fuse_cycles(
     for ic in imu_cycles:
         if ic.cycle_id in matched_imu:
             continue
+
+        imu_start = ic.swing_to_dump.timestamp_sec
+        imu_end = ic.swing_to_dig.timestamp_sec
+
+        if video_duration_sec > 0 and imu_start > video_duration_sec:
+            logger.debug(
+                "Dropping IMU cycle %d at %.1fs — beyond video duration %.1fs",
+                ic.cycle_id, imu_start, video_duration_sec,
+            )
+            continue
+
+        if video_duration_sec > 0:
+            imu_end = min(imu_end, video_duration_sec)
+
         fused_id += 1
         fused.append(FusedCycle(
             cycle_id=fused_id,
-            start_sec=ic.swing_to_dump.timestamp_sec,
-            end_sec=ic.swing_to_dig.timestamp_sec,
-            duration_sec=ic.duration_sec,
+            start_sec=imu_start,
+            end_sec=imu_end,
+            duration_sec=imu_end - imu_start,
             imu_cycle=ic,
             source="imu_only",
         ))

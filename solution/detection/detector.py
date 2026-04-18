@@ -61,11 +61,13 @@ class FrameDetections:
             return None
         return max(matches, key=lambda d: d.confidence)
 
+    REQUIRED_JOINTS = {"bucket", "arm_joint"}
+
     @property
     def has_all_joints(self) -> bool:
-        """True if bucket, arm_joint, and boom all detected."""
+        """True if bucket and arm_joint both detected."""
         found = {d.class_name for d in self.detections}
-        return all(c in found for c in CLASS_NAMES)
+        return self.REQUIRED_JOINTS.issubset(found)
 
 
 class ShovelDetector:
