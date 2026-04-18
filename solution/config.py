@@ -112,6 +112,7 @@ class BucketPhaseConfig:
     smoothing_window: int = 8
     min_phase_frames: int = 15
     x_velocity_threshold: float = 3.0
+    transport_x_velocity_threshold: float = 6.0
     x_smoothing_window: int = 5
     min_dump_duration_sec: float = 3.0
     min_idle_duration_sec: float = 4.0

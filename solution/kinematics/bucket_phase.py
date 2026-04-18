@@ -50,6 +50,7 @@ class BucketPhaseDetector:
         self._smooth_win = cfg.smoothing_window
         self._min_phase_frames = cfg.min_phase_frames
         self._x_vel_threshold = cfg.x_velocity_threshold
+        self._transport_x_vel_threshold = cfg.transport_x_velocity_threshold
         self._x_smooth_win = cfg.x_smoothing_window
         self._min_dump_frames = int(cfg.min_dump_duration_sec * FPS)
         self._min_idle_frames = int(cfg.min_idle_duration_sec * FPS)
@@ -71,6 +72,7 @@ class BucketPhaseDetector:
         self._idle_start_frame: Optional[int] = None
 
         self._idle_events: List[dict] = []
+        self._last_truck_y: Optional[float] = None
 
         self._events: List[dict] = []
         self._cycles: List[dict] = []
@@ -109,6 +111,9 @@ class BucketPhaseDetector:
 
         if bucket is None:
             return self._current_phase
+
+        if truck is not None:
+            self._last_truck_y = truck.center[1]
 
         bucket_cx, bucket_cy = bucket.center
 
@@ -149,6 +154,9 @@ class BucketPhaseDetector:
     def _is_moving_y(self) -> bool:
         return self._y_velocity > self._x_vel_threshold
 
+    def _is_transporting_x(self) -> bool:
+        return self._x_velocity > self._transport_x_vel_threshold
+
     def _bucket_overlaps_truck_x(self, bucket: Detection, truck: Detection) -> bool:
         overlap_start = max(bucket.x1, truck.x1)
         overlap_end = min(bucket.x2, truck.x2)
@@ -157,6 +165,12 @@ class BucketPhaseDetector:
         overlap_width = overlap_end - overlap_start
         bucket_width = bucket.x2 - bucket.x1
         return overlap_width > bucket_width * 0.3
+
+    def _is_bucket_above_truck(self, bucket_y: float) -> bool:
+        """Check if bucket is above truck height. Y increases downward, so bucket_y < truck_y = above."""
+        if self._last_truck_y is None:
+            return bucket_y < self._high_y
+        return bucket_y < self._last_truck_y
 
     def _classify_raw(
         self,
@@ -169,30 +183,32 @@ class BucketPhaseDetector:
 
         if (
             truck is not None
-            and bucket_y < self._high_y
+            and self._is_bucket_above_truck(bucket_y)
             and self._bucket_overlaps_truck_x(bucket, truck)
         ):
             return BucketPhase.BOTANDO_CARGA
 
-        if self._is_moving_x() or self._is_moving_y():
+        if self._is_bucket_above_truck(bucket_y) and self._is_transporting_x():
             return BucketPhase.TRANSPORTE
 
         return BucketPhase.INACTIVO
 
     def _apply_idle_grace(self, raw_phase: BucketPhase, frame_idx: int) -> BucketPhase:
         """
-        Suppress INACTIVO until raw classification stays INACTIVO for >= min_idle_duration_sec.
-
-        During the grace period, keep the previous phase. Once confirmed idle,
-        the idle start is backdated to when it first appeared.
+        Suppress INACTIVO until raw classification stays INACTIVO for >= min_idle_duration_sec
+        AND both X and Y axes are truly stationary. Any axis movement resets the grace timer.
         """
-        if raw_phase != BucketPhase.INACTIVO:
+        has_any_movement = self._is_moving_x() or self._is_moving_y()
+
+        if raw_phase != BucketPhase.INACTIVO or has_any_movement:
             if self._idle_confirmed:
                 self._close_idle_event(frame_idx)
             self._idle_candidate_start = None
             self._idle_confirmed = False
             self._idle_start_frame = None
-            return raw_phase
+            if raw_phase != BucketPhase.INACTIVO:
+                return raw_phase
+            return self._current_phase
 
         if self._idle_candidate_start is None:
             self._idle_candidate_start = frame_idx
