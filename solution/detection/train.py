@@ -7,7 +7,7 @@ from ultralytics import YOLO
 
 
 def train(
-    dataset_yaml: str = "solution/detection/dataset.yaml",
+    dataset_yaml: str = "dataset/labeling/data.yaml",
     base_model: str = "yolo26n.pt",
     epochs: int = 50,
     imgsz: int = 640,

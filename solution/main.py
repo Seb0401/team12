@@ -32,6 +32,7 @@ from solution.stereo.kinematics_3d import estimate_3d_kinematics
 from solution.productivity.metrics import compute_productivity
 from solution.productivity.recommendations import generate_recommendations
 from solution.output.annotator import VideoAnnotator
+from solution.output.csv_exporter import DetectionCSVWriter
 from solution.output.report import write_json_report
 from solution.utils.time_sync import align_imu_to_video
 
@@ -81,6 +82,9 @@ def run_pipeline() -> None:
     annotator = VideoAnnotator(fps=fps, resolution=(meta["width"], meta["height"]))
     annotator.open()
 
+    csv_writer = DetectionCSVWriter()
+    csv_writer.open()
+
     # ── Frame processing loop ──
     logger.info("Processing %d frames...", total_frames)
     fill_volumes_per_cycle: List[Optional[float]] = []
@@ -95,6 +99,7 @@ def run_pipeline() -> None:
             break
 
         detections = detector.detect(frame_left, frame_idx)
+        csv_writer.write_frame(detections, fps)
         angles = compute_joint_angles(detections)
         truck_visible = detections.get_by_class("truck") is not None
         phase = fsm.update(angles, truck_visible=truck_visible)
@@ -139,6 +144,7 @@ def run_pipeline() -> None:
     # ── Finalize ──
     fsm.finalize(total_frames - 1)
     annotator.close()
+    csv_writer.close()
     cap_left.release()
     cap_right.release()
 

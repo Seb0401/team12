@@ -8,6 +8,7 @@ outputs/*.json
 outputs/*.html
 
 /dataset/*
+/runs/*
 
 # Mantener las carpetas vacias en el repo
 !inputs/.gitkeep
