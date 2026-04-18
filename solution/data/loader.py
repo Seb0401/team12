@@ -91,6 +91,16 @@ def load_right_video() -> cv2.VideoCapture:
     return cap
 
 
+def find_imu_path() -> Path:
+    """
+    Find the IMU .npy file path without loading it.
+
+    @returns Path to the IMU .npy file
+    @raises FileNotFoundError if no matching file found
+    """
+    return _find_imu()
+
+
 def load_imu_data() -> np.ndarray:
     """
     Load IMU data from the .npy file and validate its shape.

@@ -30,6 +30,9 @@ class CycleMetrics:
     dump_sec: float = 0.0
     swing_to_dig_sec: float = 0.0
     idle_sec: float = 0.0
+    transport_sec: float = 0.0
+    excavando_sec: float = 0.0
+    botando_carga_sec: float = 0.0
     bucket_fill_m3: Optional[float] = None
     bucket_fill_pct: Optional[float] = None
     efficiency_vs_best: float = 0.0
@@ -50,8 +53,12 @@ class SummaryMetrics:
     total_idle_time_sec: float = 0.0
     total_dig_time_sec: float = 0.0
     total_swing_time_sec: float = 0.0
+    total_transport_sec: float = 0.0
+    total_excavando_sec: float = 0.0
+    total_botando_carga_sec: float = 0.0
     best_cycle_time_sec: float = 0.0
     worst_cycle_time_sec: float = 0.0
+    source: str = "fused"
 
 
 @dataclass
@@ -158,3 +165,101 @@ def compute_productivity(
         summary=summary,
         cycles=cycle_metrics_list,
     )
+
+
+def compute_refined_productivity(
+    refined_cycles: List[RefinedCycle],
+    phase_counts: dict,
+    total_video_duration_sec: float = 0.0,
+    fill_volumes: Optional[List[Optional[float]]] = None,
+) -> ProductivityReport:
+    """Compute productivity from gyro-refined cycle data.
+
+    @param refined_cycles - Cycles from FusedPhaseDetector
+    @param phase_counts - Dict mapping BucketPhase -> frame count
+    @param total_video_duration_sec - Total video length
+    @param fill_volumes - Per-cycle bucket fill estimates
+    @returns ProductivityReport with transport/excavando/botando metrics
+    """
+    if not refined_cycles:
+        logger.warning("No refined cycles detected")
+        return ProductivityReport()
+
+    cycle_metrics_list: List[CycleMetrics] = []
+
+    for i, rc in enumerate(refined_cycles):
+        start_sec = rc.start_frame / FPS
+        end_sec = rc.end_frame / FPS
+        cm = CycleMetrics(
+            cycle_id=rc.cycle_id,
+            start_sec=start_sec,
+            end_sec=end_sec,
+            duration_sec=rc.duration_sec,
+            transport_sec=rc.phase_duration(BucketPhase.TRANSPORTE),
+            excavando_sec=rc.phase_duration(BucketPhase.EXCAVANDO),
+            botando_carga_sec=rc.phase_duration(BucketPhase.BOTANDO_CARGA),
+            idle_sec=rc.phase_duration(BucketPhase.INACTIVO),
+        )
+
+        cm.swing_to_dump_sec = cm.transport_sec / 2.0
+        cm.swing_to_dig_sec = cm.transport_sec / 2.0
+        cm.dig_sec = cm.excavando_sec
+        cm.dump_sec = cm.botando_carga_sec
+
+        if fill_volumes and i < len(fill_volumes) and fill_volumes[i] is not None:
+            cm.bucket_fill_m3 = fill_volumes[i]
+            cm.bucket_fill_pct = (fill_volumes[i] / BUCKET_VOLUME_M3) * 100.0
+
+        cycle_metrics_list.append(cm)
+
+    durations = [cm.duration_sec for cm in cycle_metrics_list]
+    realistic_durations = [d for d in durations if d >= 15.0]
+    best_time = min(realistic_durations) if realistic_durations else min(durations)
+
+    for cm in cycle_metrics_list:
+        cm.efficiency_vs_best = best_time / cm.duration_sec if cm.duration_sec > 0 else 0.0
+
+    total_idle = sum(phase_counts.get(BucketPhase.INACTIVO, 0) for _ in [1]) / FPS
+    total_transport = sum(phase_counts.get(BucketPhase.TRANSPORTE, 0) for _ in [1]) / FPS
+    total_excavando = sum(phase_counts.get(BucketPhase.EXCAVANDO, 0) for _ in [1]) / FPS
+    total_botando = sum(phase_counts.get(BucketPhase.BOTANDO_CARGA, 0) for _ in [1]) / FPS
+
+    n_cycles = len(cycle_metrics_list)
+    avg_cycle = sum(durations) / n_cycles
+    cycles_per_hour = 3600.0 / avg_cycle if avg_cycle > 0 else 0.0
+
+    active_time = total_video_duration_sec - total_idle
+    utilization = (active_time / total_video_duration_sec * 100.0) if total_video_duration_sec > 0 else 0.0
+
+    fills = [cm.bucket_fill_m3 for cm in cycle_metrics_list if cm.bucket_fill_m3 is not None]
+    avg_fill = sum(fills) / len(fills) if fills else None
+
+    payload = (avg_fill or BUCKET_VOLUME_M3) * MATERIAL_DENSITY_TPM3
+    productivity_tph = payload * cycles_per_hour * (utilization / 100.0)
+
+    summary = SummaryMetrics(
+        total_duration_sec=total_video_duration_sec,
+        total_cycles=n_cycles,
+        avg_cycle_time_sec=avg_cycle,
+        cycles_per_hour=cycles_per_hour,
+        utilization_pct=utilization,
+        avg_bucket_fill_m3=avg_fill,
+        estimated_payload_tonnes=payload,
+        estimated_productivity_tph=productivity_tph,
+        total_idle_time_sec=total_idle,
+        total_dig_time_sec=total_excavando,
+        total_swing_time_sec=total_transport,
+        total_transport_sec=total_transport,
+        total_excavando_sec=total_excavando,
+        total_botando_carga_sec=total_botando,
+        best_cycle_time_sec=best_time,
+        worst_cycle_time_sec=max(durations),
+        source="gyro_refined",
+    )
+
+    logger.info(
+        "Refined productivity: %d cycles, %.1f cycles/hr, %.1f%% util, %.0f t/hr",
+        n_cycles, cycles_per_hour, utilization, productivity_tph,
+    )
+
+    return ProductivityReport(summary=summary, cycles=cycle_metrics_list)

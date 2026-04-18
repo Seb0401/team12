@@ -1,15 +1,15 @@
-"""Main pipeline orchestrator for EX-5600 shovel productivity analysis."""
+"""Main pipeline orchestrator for EX-5600 shovel productivity analysis.
+
+Uses BucketPhaseDetector (vision) refined by Gyro-Y (IMU) for accurate
+cycle detection and phase timing. Outputs annotated video + JSON metrics.
+"""
 
 import logging
 import time
 from typing import List, Optional
 
-import cv2
-import numpy as np
-
 from solution.config import (
     setup_logging,
-    FPS,
     STEREO_SAMPLE_RATE,
     OUTPUTS_DIR,
 )
@@ -17,41 +17,42 @@ from solution.data.loader import (
     load_left_video,
     load_right_video,
     load_imu_data,
+    find_imu_path,
     get_video_metadata,
     validate_inputs,
 )
-from solution.detection.detector import ShovelDetector, FrameDetections
-from solution.kinematics.joint_angles import compute_joint_angles, JointAngles, reset_interpolation_state
-from solution.kinematics.cycle_detector import CycleFSM, Phase
-from solution.imu.processor import process_imu
-from solution.imu.cycle_detector import detect_swing_peaks, pair_swing_events
-from solution.imu.fusion import fuse_cycles
+from solution.detection.detector import ShovelDetector
+from solution.kinematics.bucket_phase import BucketPhase
+from solution.kinematics.fused_phase_detector import FusedPhaseDetector
 from solution.stereo.depth import StereoDepthEstimator
 from solution.stereo.volume import estimate_bucket_fill
-from solution.stereo.kinematics_3d import estimate_3d_kinematics
-from solution.productivity.metrics import compute_productivity
+from solution.productivity.metrics import compute_refined_productivity
 from solution.productivity.recommendations import generate_recommendations
 from solution.output.annotator import VideoAnnotator
 from solution.output.csv_exporter import DetectionCSVWriter
+from solution.imu.dashboard_analysis import run_imu_dashboard_analysis
 from solution.output.report import write_json_report
-from solution.utils.time_sync import align_imu_to_video
+from solution.utils.time_sync import (
+    frame_to_imu_sample,
+    AlignmentResult,
+    DEFAULT_OFFSET_SAMPLES,
+)
 
 logger = logging.getLogger(__name__)
 
 
 def run_pipeline() -> None:
-    """Execute the full analysis pipeline: load → detect → analyze → output."""
+    """Execute the full analysis pipeline: load -> detect -> fuse -> output."""
     setup_logging()
     start_time = time.time()
 
-    logger.info("=== EX-5600 Shovel Productivity Analysis ===")
+    logger.info("=== EX-5600 Shovel Productivity Analysis (Gyro-Refined) ===")
 
     if not validate_inputs():
         raise RuntimeError("Input validation failed. Check files in ./inputs/")
 
     OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
 
-    # ── Load data ──
     logger.info("Loading data...")
     cap_left = load_left_video()
     cap_right = load_right_video()
@@ -64,30 +65,30 @@ def run_pipeline() -> None:
 
     logger.info("Video: %d frames, %.1f fps, %.1f sec", total_frames, fps, duration_sec)
 
-    # ── Process IMU ──
-    logger.info("Processing IMU...")
-    processed_imu = process_imu(imu_raw)
-    imu_swing_events = detect_swing_peaks(processed_imu)
-    imu_cycles = pair_swing_events(imu_swing_events)
+    gyro_y = imu_raw[:, 5]
+    total_imu_samples = len(imu_raw)
 
-    # ── Align IMU to video ──
-    imu_alignment = align_imu_to_video(imu_raw[:, 0], fps, total_frames)
+    alignment = AlignmentResult(
+        offset_samples=DEFAULT_OFFSET_SAMPLES,
+        offset_sec=DEFAULT_OFFSET_SAMPLES / fps,
+        correlation_score=0.0,
+        method="default",
+        segment_offsets=[],
+    )
 
-    # ── Initialize components ──
     detector = ShovelDetector()
     detector.load()
 
     stereo = StereoDepthEstimator()
-    fsm = CycleFSM()
+    fused_detector = FusedPhaseDetector()
     annotator = VideoAnnotator(fps=fps, resolution=(meta["width"], meta["height"]))
     annotator.open()
 
     csv_writer = DetectionCSVWriter()
     csv_writer.open()
 
-    # ── Frame processing loop ──
-    reset_interpolation_state()
-    logger.info("Processing %d frames...", total_frames)
+    logger.info("Processing %d frames with gyro-Y refinement...", total_frames)
+    phase_counts: dict[BucketPhase, int] = {p: 0 for p in BucketPhase}
     fill_volumes_per_cycle: List[Optional[float]] = []
     current_cycle_fills: List[float] = []
     prev_cycle_count = 0
@@ -101,9 +102,13 @@ def run_pipeline() -> None:
 
         detections = detector.detect(frame_left, frame_idx)
         csv_writer.write_frame(detections, fps)
-        angles = compute_joint_angles(detections)
-        truck_visible = detections.get_by_class("truck") is not None
-        phase = fsm.update(angles, truck_visible=truck_visible)
+
+        sample_idx = frame_to_imu_sample(frame_idx, alignment)
+        sample_idx = max(0, min(sample_idx, total_imu_samples - 1))
+        gy_value = float(gyro_y[sample_idx])
+
+        phase = fused_detector.update(detections, gy_value)
+        phase_counts[phase] = phase_counts.get(phase, 0) + 1
 
         bucket_fill: Optional[float] = None
         if frame_idx % STEREO_SAMPLE_RATE == 0 and ret_right and frame_right is not None:
@@ -113,7 +118,7 @@ def run_pipeline() -> None:
             if bucket_fill is not None:
                 current_cycle_fills.append(bucket_fill)
 
-        cycle_count = len(fsm.cycles)
+        cycle_count = fused_detector.cycle_count
         if cycle_count > prev_cycle_count:
             avg_fill = (
                 sum(current_cycle_fills) / len(current_cycle_fills)
@@ -124,11 +129,12 @@ def run_pipeline() -> None:
             current_cycle_fills = []
             prev_cycle_count = cycle_count
 
+        _phase_for_annotator = _bucket_phase_to_fsm_phase(phase)
         annotator.annotate_frame(
             frame=frame_left,
             detections=detections,
-            phase=phase,
-            angles=angles,
+            phase=_phase_for_annotator,
+            angles=None,
             cycle_count=cycle_count,
             frame_idx=frame_idx,
         )
@@ -136,30 +142,40 @@ def run_pipeline() -> None:
         if frame_idx % 500 == 0:
             elapsed = time.time() - start_time
             logger.info(
-                "Frame %d/%d (%.0f%%) — %.1fs elapsed",
+                "Frame %d/%d (%.0f%%) — %.1fs elapsed — phase=%s gyro_y=%.1f",
                 frame_idx, total_frames,
                 frame_idx / total_frames * 100,
                 elapsed,
+                phase.name,
+                gy_value,
             )
 
-    # ── Finalize ──
-    fsm.finalize(total_frames - 1)
+    fused_detector.finalize(total_frames - 1)
     annotator.close()
     csv_writer.close()
     cap_left.release()
     cap_right.release()
 
-    # ── Fuse cycles ──
-    video_cycles = fsm.cycles
-    fused = fuse_cycles(video_cycles, imu_cycles, video_duration_sec=duration_sec)
-
-    # ── Compute productivity ──
-    report = compute_productivity(fused, fill_volumes_per_cycle, duration_sec)
+    refined_cycles = fused_detector.cycles
+    report = compute_refined_productivity(
+        refined_cycles,
+        phase_counts,
+        total_video_duration_sec=duration_sec,
+        fill_volumes=fill_volumes_per_cycle,
+    )
     recommendations = generate_recommendations(report)
     report.recommendations = recommendations
 
-    # ── Write output ──
-    write_json_report(report, recommendations)
+    imu_analysis = None
+    try:
+        imu_path = find_imu_path()
+        logger.info("Running IMU dashboard analysis from %s", imu_path)
+        imu_analysis = run_imu_dashboard_analysis(str(imu_path))
+        logger.info("IMU dashboard analysis: %d cycles", len(imu_analysis.get("all_cycles", [])))
+    except Exception:
+        logger.warning("IMU dashboard analysis failed, skipping", exc_info=True)
+
+    write_json_report(report, recommendations, imu_analysis=imu_analysis)
 
     elapsed = time.time() - start_time
     logger.info("=== Pipeline complete in %.1fs ===", elapsed)
@@ -169,6 +185,21 @@ def run_pipeline() -> None:
         report.summary.estimated_productivity_tph,
         report.summary.utilization_pct,
     )
+
+    for p, count in phase_counts.items():
+        logger.info("  %s: %.1fs (%.1f%%)", p.name, count / fps, count / total_frames * 100)
+
+
+def _bucket_phase_to_fsm_phase(bp: BucketPhase):
+    """Map BucketPhase to CycleFSM Phase for annotator compatibility."""
+    from solution.kinematics.cycle_detector import Phase
+    mapping = {
+        BucketPhase.EXCAVANDO: Phase.DIG,
+        BucketPhase.TRANSPORTE: Phase.SWING_TO_DUMP,
+        BucketPhase.BOTANDO_CARGA: Phase.DUMP,
+        BucketPhase.INACTIVO: Phase.IDLE,
+    }
+    return mapping.get(bp, Phase.IDLE)
 
 
 if __name__ == "__main__":
