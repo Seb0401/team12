@@ -11,6 +11,8 @@ from solution.config import (
 )
 from solution.imu.fusion import FusedCycle
 from solution.kinematics.cycle_detector import Phase
+from solution.kinematics.bucket_phase import BucketPhase
+from solution.kinematics.fused_phase_detector import RefinedCycle
 
 logger = logging.getLogger(__name__)
 
