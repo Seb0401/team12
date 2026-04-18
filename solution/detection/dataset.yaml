@@ -1,0 +1,9 @@
+path: ../../dataset
+train: images/train
+val: images/val
+
+names:
+  0: bucket
+  1: arm_joint
+  2: boom
+  3: truck
