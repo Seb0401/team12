@@ -90,11 +90,34 @@ class CycleFSMConfig:
     dig_min_arm_curl_rate_deg_s: float = 3.0
     swing_min_gyro_magnitude: float = 1.0
     dump_bucket_tilt_threshold_deg: float = 120.0
-    min_phase_duration_sec: float = 1.0
+    min_phase_duration_sec: float = 2.0
     max_cycle_duration_sec: float = 120.0
+    min_cycle_duration_sec: float = 15.0
+    max_phase_duration_sec: float = 25.0
+    angle_smoothing_window: int = 5
 
 
 CYCLE_FSM_CONFIG = CycleFSMConfig()
+
+# ---------------------------------------------------------------------------
+# Bucket-Position Phase Detection (simple CV rules)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class BucketPhaseConfig:
+    """Phase detection based on bucket Y-position, X-velocity, and truck presence."""
+
+    bucket_low_y: float = 350.0
+    bucket_high_y: float = 250.0
+    smoothing_window: int = 8
+    min_phase_frames: int = 15
+    x_velocity_threshold: float = 3.0
+    x_smoothing_window: int = 5
+    min_dump_duration_sec: float = 3.0
+    min_idle_duration_sec: float = 4.0
+
+
+BUCKET_PHASE_CONFIG = BucketPhaseConfig()
 
 # ---------------------------------------------------------------------------
 # Fusion

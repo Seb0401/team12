@@ -1,9 +1,7 @@
 """
 Standalone realtime video viewer with YOLO detection overlays.
 
-Displays the raw video with bounding boxes, joint angles, and cycle phase
-annotations in a live OpenCV window. No full pipeline preprocessing required —
-frames are processed and displayed on the fly.
+Uses bucket Y-position + truck visibility for phase classification.
 
 Usage:
     python -m solution.viewer [--video left|right] [--speed MULTIPLIER]
@@ -21,7 +19,6 @@ Controls:
 import argparse
 import logging
 import time
-from typing import Optional
 
 import cv2
 import numpy as np
@@ -29,28 +26,16 @@ import numpy as np
 from solution.config import setup_logging, COLORS
 from solution.data.loader import load_left_video, load_right_video, get_video_metadata
 from solution.detection.detector import ShovelDetector, FrameDetections
-from solution.kinematics.joint_angles import compute_joint_angles, JointAngles
-from solution.kinematics.cycle_detector import CycleFSM, Phase
+from solution.kinematics.bucket_phase import (
+    BucketPhaseDetector,
+    BucketPhase,
+    PHASE_DISPLAY,
+    PHASE_COLORS_BGR,
+)
 
 logger = logging.getLogger(__name__)
 
 WINDOW_NAME = "EX-5600 Visor en Tiempo Real"
-
-PHASE_COLORS = {
-    Phase.IDLE: (128, 128, 128),
-    Phase.DIG: (0, 200, 0),
-    Phase.SWING_TO_DUMP: (0, 220, 255),
-    Phase.DUMP: (0, 0, 220),
-    Phase.SWING_TO_DIG: (220, 180, 0),
-}
-
-PHASE_LABELS = {
-    Phase.IDLE: "INACTIVO",
-    Phase.DIG: "EXCAVANDO",
-    Phase.SWING_TO_DUMP: "GIRO > DESCARGA",
-    Phase.DUMP: "DESCARGA",
-    Phase.SWING_TO_DIG: "GIRO > EXCAVAR",
-}
 
 CLASS_DISPLAY_NAMES = {
     "bucket": "balde",
@@ -91,8 +76,12 @@ def draw_detections(frame: np.ndarray, detections: FrameDetections) -> None:
 
 def draw_hud(
     frame: np.ndarray,
-    phase: Phase,
-    angles: Optional[JointAngles],
+    phase: BucketPhase,
+    bucket_y: float,
+    truck_visible: bool,
+    x_velocity: float,
+    idle_alert: bool,
+    idle_duration: float,
     cycle_count: int,
     frame_idx: int,
     fps: float,
@@ -104,8 +93,12 @@ def draw_hud(
     Draw the heads-up display panel on the frame.
 
     @param frame - BGR image to annotate (modified in-place)
-    @param phase - Current cycle phase
-    @param angles - Current joint angles
+    @param phase - Current bucket phase
+    @param bucket_y - Current smoothed bucket Y position
+    @param truck_visible - Whether truck is detected
+    @param x_velocity - Smoothed bucket X-axis velocity (px/frame)
+    @param idle_alert - Whether idle alert is active (>= 4s)
+    @param idle_duration - Current idle duration in seconds
     @param cycle_count - Running cycle counter
     @param frame_idx - Current frame index
     @param fps - Video frames per second
@@ -115,7 +108,7 @@ def draw_hud(
     """
     h, w = frame.shape[:2]
 
-    hud_w, hud_h = 300, 200
+    hud_w, hud_h = 320, 270
     x0, y0 = w - hud_w - 10, 10
     x1, y1 = w - 10, y0 + hud_h
 
@@ -140,8 +133,8 @@ def draw_hud(
     )
     ty += 32
 
-    phase_color = PHASE_COLORS.get(phase, (128, 128, 128))
-    phase_label = PHASE_LABELS.get(phase, "UNKNOWN")
+    phase_color = PHASE_COLORS_BGR.get(phase, (128, 128, 128))
+    phase_label = PHASE_DISPLAY.get(phase, "DESCONOCIDO")
     cv2.circle(frame, (tx + 8, ty - 6), 8, phase_color, -1)
     cv2.putText(
         frame, phase_label, (tx + 24, ty),
@@ -149,16 +142,44 @@ def draw_hud(
     )
     ty += 28
 
-    if angles and angles.valid:
-        for name, val in [("Brazo", angles.arm_angle_deg), ("Balde", angles.bucket_angle_deg)]:
-            if val is not None:
-                cv2.putText(
-                    frame, f"{name}: {val:.1f} grados", (tx, ty),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (160, 160, 160), 1,
-                )
-                ty += 20
+    cv2.putText(
+        frame, f"Balde Y: {bucket_y:.0f}px", (tx, ty),
+        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (160, 160, 160), 1,
+    )
+    ty += 20
 
-    ty += 4
+    vel_color = (0, 200, 200) if x_velocity > 3.0 else (160, 160, 160)
+    cv2.putText(
+        frame, f"Vel X: {x_velocity:.1f} px/f", (tx, ty),
+        cv2.FONT_HERSHEY_SIMPLEX, 0.45, vel_color, 1,
+    )
+    ty += 20
+
+    truck_text = "Camion: SI" if truck_visible else "Camion: NO"
+    truck_color = (0, 200, 0) if truck_visible else (0, 0, 200)
+    cv2.putText(
+        frame, truck_text, (tx, ty),
+        cv2.FONT_HERSHEY_SIMPLEX, 0.45, truck_color, 1,
+    )
+    ty += 24
+
+    if idle_alert:
+        alert_text = f"ALERTA INACTIVO: {idle_duration:.1f}s"
+        cv2.putText(
+            frame, alert_text, (tx, ty),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 255), 2,
+        )
+        ty += 24
+
+        banner_h = 40
+        overlay_banner = frame.copy()
+        cv2.rectangle(overlay_banner, (0, h // 2 - banner_h // 2), (w, h // 2 + banner_h // 2), (0, 0, 180), -1)
+        cv2.addWeighted(overlay_banner, 0.5, frame, 0.5, 0, frame)
+        cv2.putText(
+            frame, f"INACTIVO {idle_duration:.1f}s", (w // 2 - 120, h // 2 + 8),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2,
+        )
+
     status_parts = []
     if paused:
         status_parts.append("PAUSADO")
@@ -180,9 +201,9 @@ def draw_controls_hint(frame: np.ndarray) -> None:
 
     @param frame - BGR image to annotate (modified in-place)
     """
-    h = frame.shape[0]
+    h, w = frame.shape[:2]
     hint = "ESPACIO:Pausa  Q:Salir  +/-:Velocidad  D:Detecciones  F:Avanzar  R:Reiniciar"
-    cv2.rectangle(frame, (0, h - 28), (frame.shape[1], h), (0, 0, 0), -1)
+    cv2.rectangle(frame, (0, h - 28), (w, h), (0, 0, 0), -1)
     cv2.putText(
         frame, hint, (10, h - 8),
         cv2.FONT_HERSHEY_SIMPLEX, 0.42, (140, 140, 140), 1,
@@ -213,12 +234,28 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def run_viewer() -> None:
-    """
-    Main viewer loop: load video + model, display frames with annotations.
+def _process_frame(
+    frame: np.ndarray,
+    frame_idx: int,
+    detector: ShovelDetector,
+    phase_detector: BucketPhaseDetector,
+) -> tuple:
+    detections = detector.detect(frame, frame_idx)
+    phase = phase_detector.update(detections)
+    cycle_count = phase_detector.cycle_count
+    x_velocity = phase_detector.x_velocity
+    idle_alert = phase_detector.is_idle_alert
+    idle_duration = phase_detector.idle_duration_sec
 
-    Handles keyboard controls for pause, speed, detection toggle, etc.
-    """
+    bucket = detections.get_by_class("bucket")
+    bucket_y = bucket.center[1] if bucket else 0.0
+    truck_visible = detections.get_by_class("truck") is not None
+
+    return detections, phase, cycle_count, bucket_y, truck_visible, x_velocity, idle_alert, idle_duration
+
+
+def run_viewer() -> None:
+    """Main viewer loop: load video + model, display frames with annotations."""
     setup_logging()
     args = parse_args()
 
@@ -237,7 +274,7 @@ def run_viewer() -> None:
     detector = ShovelDetector()
     detector.load()
 
-    fsm = CycleFSM()
+    phase_detector = BucketPhaseDetector()
 
     speed = args.speed
     paused = False
@@ -260,11 +297,9 @@ def run_viewer() -> None:
 
             t0 = time.monotonic()
 
-            detections = detector.detect(frame, frame_idx)
-            angles = compute_joint_angles(detections)
-            truck_visible = detections.get_by_class("truck") is not None
-            phase = fsm.update(angles, truck_visible=truck_visible)
-            cycle_count = len(fsm.cycles)
+            detections, phase, cycle_count, bucket_y, truck_visible, x_velocity, idle_alert, idle_duration = _process_frame(
+                frame, frame_idx, detector, phase_detector,
+            )
 
             display = frame.copy()
 
@@ -272,8 +307,9 @@ def run_viewer() -> None:
                 draw_detections(display, detections)
 
             draw_hud(
-                display, phase, angles, cycle_count, frame_idx,
-                fps, paused, speed, show_detections,
+                display, phase, bucket_y, truck_visible, x_velocity,
+                idle_alert, idle_duration,
+                cycle_count, frame_idx, fps, paused, speed, show_detections,
             )
             draw_controls_hint(display)
 
@@ -304,18 +340,17 @@ def run_viewer() -> None:
         elif key in (ord("f"), ord("F")) and paused:
             ret, frame = cap.read()
             if ret and frame is not None:
-                detections = detector.detect(frame, frame_idx)
-                angles = compute_joint_angles(detections)
-                truck_visible = detections.get_by_class("truck") is not None
-                phase = fsm.update(angles, truck_visible=truck_visible)
-                cycle_count = len(fsm.cycles)
+                detections, phase, cycle_count, bucket_y, truck_visible, x_velocity, idle_alert, idle_duration = _process_frame(
+                    frame, frame_idx, detector, phase_detector,
+                )
 
                 display = frame.copy()
                 if show_detections:
                     draw_detections(display, detections)
                 draw_hud(
-                    display, phase, angles, cycle_count, frame_idx,
-                    fps, paused, speed, show_detections,
+                    display, phase, bucket_y, truck_visible, x_velocity,
+                    idle_alert, idle_duration,
+                    cycle_count, frame_idx, fps, paused, speed, show_detections,
                 )
                 draw_controls_hint(display)
                 cv2.imshow(WINDOW_NAME, display)
@@ -323,7 +358,7 @@ def run_viewer() -> None:
         elif key in (ord("r"), ord("R")):
             cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
             frame_idx = 0
-            fsm = CycleFSM()
+            phase_detector = BucketPhaseDetector()
             logger.info("Restarted from beginning")
 
     cap.release()

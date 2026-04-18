@@ -1,6 +1,7 @@
 """Finite state machine for detecting shovel dig-swing-dump cycles from joint angles."""
 
 import logging
+from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import List, Optional
@@ -73,11 +74,38 @@ class Cycle:
         return total
 
 
+class _AngleSmoother:
+    """Sliding-window smoother for angle time series to suppress noise."""
+
+    def __init__(self, window: int = 5) -> None:
+        self._window = max(1, window)
+        self._arm_buf: deque[float] = deque(maxlen=self._window)
+        self._boom_buf: deque[float] = deque(maxlen=self._window)
+        self._bucket_buf: deque[float] = deque(maxlen=self._window)
+
+    def push(self, angles: JointAngles) -> JointAngles:
+        """Push raw angles, return smoothed copy."""
+        if not angles.valid:
+            return angles
+
+        self._arm_buf.append(angles.arm_angle_deg or 0.0)
+        self._boom_buf.append(angles.boom_angle_deg or 0.0)
+        self._bucket_buf.append(angles.bucket_angle_deg or 0.0)
+
+        smoothed = JointAngles(frame_idx=angles.frame_idx)
+        smoothed.arm_angle_deg = sum(self._arm_buf) / len(self._arm_buf)
+        smoothed.boom_angle_deg = sum(self._boom_buf) / len(self._boom_buf)
+        smoothed.bucket_angle_deg = sum(self._bucket_buf) / len(self._bucket_buf)
+        smoothed.valid = True
+        return smoothed
+
+
 class CycleFSM:
     """
     Finite state machine that classifies shovel phases from joint angle time series.
 
-    Transition logic based on angle rates and absolute angle thresholds.
+    Transition logic based on angle rates and absolute angle thresholds,
+    with temporal smoothing and min/max duration guards.
     """
 
     def __init__(self) -> None:
@@ -90,6 +118,8 @@ class CycleFSM:
         self._current_cycle_phases: List[PhaseEvent] = []
         self._cycle_count = 0
         self._min_phase_frames = int(self._config.min_phase_duration_sec * FPS)
+        self._max_phase_frames = int(self._config.max_phase_duration_sec * FPS)
+        self._smoother = _AngleSmoother(self._config.angle_smoothing_window)
 
     def update(self, angles: JointAngles, truck_visible: bool = False) -> Phase:
         """
@@ -100,31 +130,56 @@ class CycleFSM:
         @returns Current classified phase
         """
         self._truck_visible = truck_visible
+        smoothed = self._smoother.push(angles)
 
-        if not angles.valid:
+        if not smoothed.valid:
+            self._check_phase_timeout(angles.frame_idx)
             return self._current_phase
 
         if self._prev_angles is not None and self._prev_angles.valid:
-            new_phase = self._classify_transition(angles)
+            new_phase = self._classify_transition(smoothed, angles.frame_idx)
             if new_phase != self._current_phase:
                 frames_in_phase = angles.frame_idx - self._phase_start_frame
                 if frames_in_phase >= self._min_phase_frames:
                     self._transition_to(new_phase, angles.frame_idx)
 
-        self._prev_angles = angles
+        self._check_phase_timeout(angles.frame_idx)
+        self._prev_angles = smoothed
         return self._current_phase
 
-    def _classify_transition(self, angles: JointAngles) -> Phase:
+    def _check_phase_timeout(self, frame_idx: int) -> None:
+        """Force phase exit when max duration exceeded."""
+        frames_in_phase = frame_idx - self._phase_start_frame
+        if frames_in_phase < self._max_phase_frames:
+            return
+
+        fallback = {
+            Phase.SWING_TO_DUMP: Phase.DUMP,
+            Phase.DUMP: Phase.SWING_TO_DIG,
+            Phase.SWING_TO_DIG: Phase.IDLE,
+            Phase.DIG: Phase.SWING_TO_DUMP,
+        }
+        next_phase = fallback.get(self._current_phase)
+        if next_phase is not None:
+            logger.debug(
+                "Phase %s timeout at frame %d (%.1fs) — forcing %s",
+                self._current_phase.name, frame_idx, frame_idx / FPS,
+                next_phase.name,
+            )
+            self._transition_to(next_phase, frame_idx)
+
+    def _classify_transition(self, angles: JointAngles, frame_idx: int) -> Phase:
         """
         Determine target phase from angle changes between consecutive frames.
 
-        Uses arm angle rate, boom angle rate, and bucket tilt to classify.
-
-        @param angles - Current frame angles
+        @param angles - Smoothed current frame angles
+        @param frame_idx - Current frame index
         @returns Target phase based on angle analysis
         """
         arm_rate = abs(angles.arm_angle_deg - self._prev_angles.arm_angle_deg) * FPS
         boom_rate = abs(angles.boom_angle_deg - self._prev_angles.boom_angle_deg) * FPS
+
+        arm_delta = (angles.arm_angle_deg - self._prev_angles.arm_angle_deg) * FPS
 
         is_idle = (
             arm_rate < self._config.idle_max_angle_rate_deg_s
@@ -137,28 +192,37 @@ class CycleFSM:
         bucket_tilt = angles.bucket_angle_deg or 0.0
         is_dumping = bucket_tilt > self._config.dump_bucket_tilt_threshold_deg
 
-        if is_idle:
-            return Phase.IDLE
-
         truck_here = getattr(self, "_truck_visible", False)
 
         if self._current_phase == Phase.IDLE:
             if is_digging:
                 return Phase.DIG
-            if is_swinging:
+            if is_swinging and not is_digging:
                 return Phase.SWING_TO_DUMP
 
         elif self._current_phase == Phase.DIG:
-            if is_swinging:
+            if is_swinging and not is_digging:
                 return Phase.SWING_TO_DUMP
+            if is_idle:
+                return Phase.IDLE
 
         elif self._current_phase == Phase.SWING_TO_DUMP:
-            if is_dumping or truck_here or (not is_swinging and not is_digging):
+            if is_dumping or truck_here:
                 return Phase.DUMP
+            if is_idle:
+                return Phase.DUMP
+            if is_digging and not is_swinging:
+                return Phase.DIG
 
         elif self._current_phase == Phase.DUMP:
-            if is_swinging or (not truck_here and not is_dumping):
+            if is_swinging:
                 return Phase.SWING_TO_DIG
+            if is_digging:
+                return Phase.SWING_TO_DIG
+            if is_idle:
+                frames_in_dump = frame_idx - self._phase_start_frame
+                if frames_in_dump >= int(3.0 * FPS):
+                    return Phase.SWING_TO_DIG
 
         elif self._current_phase == Phase.SWING_TO_DIG:
             if is_digging:
@@ -196,15 +260,36 @@ class CycleFSM:
         self._phase_start_frame = frame_idx
 
     def _complete_cycle(self, end_frame: int) -> None:
-        """Finalize current cycle and add to results."""
+        """Finalize current cycle and add to results if it meets minimum duration."""
         if not self._current_cycle_phases:
+            return
+
+        start_frame = self._current_cycle_phases[0].start_frame
+        cycle_duration_sec = (end_frame - start_frame) / FPS
+
+        if cycle_duration_sec < self._config.min_cycle_duration_sec:
+            logger.debug(
+                "Rejecting short cycle: %.1fs < %.1fs minimum (frames %d–%d)",
+                cycle_duration_sec, self._config.min_cycle_duration_sec,
+                start_frame, end_frame,
+            )
+            self._current_cycle_phases = []
+            return
+
+        if cycle_duration_sec > self._config.max_cycle_duration_sec:
+            logger.debug(
+                "Rejecting long cycle: %.1fs > %.1fs maximum (frames %d–%d)",
+                cycle_duration_sec, self._config.max_cycle_duration_sec,
+                start_frame, end_frame,
+            )
+            self._current_cycle_phases = []
             return
 
         self._cycle_count += 1
         cycle = Cycle(
             cycle_id=self._cycle_count,
             phases=list(self._current_cycle_phases),
-            start_frame=self._current_cycle_phases[0].start_frame,
+            start_frame=start_frame,
             end_frame=end_frame,
         )
         self._cycles.append(cycle)

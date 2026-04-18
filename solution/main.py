@@ -21,7 +21,7 @@ from solution.data.loader import (
     validate_inputs,
 )
 from solution.detection.detector import ShovelDetector, FrameDetections
-from solution.kinematics.joint_angles import compute_joint_angles, JointAngles
+from solution.kinematics.joint_angles import compute_joint_angles, JointAngles, reset_interpolation_state
 from solution.kinematics.cycle_detector import CycleFSM, Phase
 from solution.imu.processor import process_imu
 from solution.imu.cycle_detector import detect_swing_peaks, pair_swing_events
@@ -86,6 +86,7 @@ def run_pipeline() -> None:
     csv_writer.open()
 
     # ── Frame processing loop ──
+    reset_interpolation_state()
     logger.info("Processing %d frames...", total_frames)
     fill_volumes_per_cycle: List[Optional[float]] = []
     current_cycle_fills: List[float] = []
@@ -150,7 +151,7 @@ def run_pipeline() -> None:
 
     # ── Fuse cycles ──
     video_cycles = fsm.cycles
-    fused = fuse_cycles(video_cycles, imu_cycles)
+    fused = fuse_cycles(video_cycles, imu_cycles, video_duration_sec=duration_sec)
 
     # ── Compute productivity ──
     report = compute_productivity(fused, fill_volumes_per_cycle, duration_sec)

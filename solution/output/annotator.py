@@ -218,8 +218,8 @@ class VideoAnnotator:
     def _draw_info_bar(self, frame: np.ndarray, cycle_count: int, frame_idx: int) -> None:
         time_sec = frame_idx / self._fps
         text = f"Ciclos: {cycle_count} | Tiempo: {time_sec:.1f}s | Cuadro: {frame_idx}"
-        h = frame.shape[0]
-        cv2.rectangle(frame, (0, h - 30), (400, h), COLORS.phase_bg, -1)
+        h, w = frame.shape[:2]
+        cv2.rectangle(frame, (0, h - 30), (w, h), COLORS.phase_bg, -1)
         cv2.putText(
             frame, text, (10, h - 8),
             cv2.FONT_HERSHEY_SIMPLEX, 0.5, COLORS.text, 1,

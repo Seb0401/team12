@@ -105,7 +105,9 @@ def compute_productivity(
         cycle_metrics_list.append(cm)
 
     durations = [cm.duration_sec for cm in cycle_metrics_list]
-    best_time = min(durations)
+
+    realistic_durations = [d for d in durations if d >= 15.0]
+    best_time = min(realistic_durations) if realistic_durations else min(durations)
 
     for cm in cycle_metrics_list:
         cm.efficiency_vs_best = best_time / cm.duration_sec if cm.duration_sec > 0 else 0.0
