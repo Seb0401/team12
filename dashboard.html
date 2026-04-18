@@ -1,0 +1,1035 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>EX-5600 — Dashboard de Productividad</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+  :root {
+    --dark-bg:  #1a1a2e;
+    --panel-bg: #16213e;
+    --btn-bg:   #0f3460;
+    --btn-act:  #c0392b;
+    --accent:   #00d4ff;
+    --green:    #00ff88;
+    --red:      #ff6b6b;
+    --yellow:   #ffd700;
+    --orange:   #ff9f43;
+    --purple:   #a29bfe;
+    --white:    #ffffff;
+    --gray:     #aaaaaa;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--dark-bg);
+    color: var(--white);
+    font-family: 'Segoe UI', Arial, sans-serif;
+    min-height: 100vh;
+  }
+  /* ── Header ── */
+  header {
+    background: var(--panel-bg);
+    border-bottom: 2px solid var(--accent);
+    padding: 10px 20px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  header h1 {
+    font-size: 1.2rem;
+    color: var(--white);
+    font-weight: 700;
+    letter-spacing: 1px;
+  }
+  header .subtitle {
+    font-size: 0.75rem;
+    color: var(--gray);
+  }
+  /* ── Nav buttons ── */
+  nav {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    padding: 10px 20px;
+    background: var(--panel-bg);
+    border-bottom: 1px solid #333;
+  }
+  nav button {
+    background: var(--btn-bg);
+    color: var(--white);
+    border: 1px solid #555;
+    border-radius: 4px;
+    padding: 7px 14px;
+    font-size: 0.78rem;
+    font-weight: 700;
+    cursor: pointer;
+    transition: background 0.2s;
+    letter-spacing: 0.5px;
+  }
+  nav button:hover { background: #1e3a5f; }
+  nav button.active { background: var(--btn-act); border-color: var(--btn-act); }
+  /* ── Content ── */
+  main { padding: 16px 20px; }
+  .view { display: none; }
+  .view.active { display: block; }
+  /* ── Grid helpers ── */
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 14px; }
+  .grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px; margin-bottom: 14px; }
+  .grid-4 { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 14px; margin-bottom: 14px; }
+  .grid-5 { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin-bottom: 14px; }
+  .col-span-2 { grid-column: span 2; }
+  .col-span-3 { grid-column: span 3; }
+  /* ── Panel ── */
+  .panel {
+    background: var(--panel-bg);
+    border: 1px solid #2a3a5a;
+    border-radius: 8px;
+    padding: 14px;
+  }
+  .panel h3 {
+    font-size: 0.85rem;
+    color: var(--yellow);
+    font-weight: 700;
+    margin-bottom: 10px;
+    border-bottom: 1px solid #2a3a5a;
+    padding-bottom: 6px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  /* ── KPI cards ── */
+  .kpi-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+    gap: 10px;
+    margin-bottom: 14px;
+  }
+  .kpi-card {
+    background: var(--btn-bg);
+    border-radius: 8px;
+    padding: 12px 14px;
+    border-left: 4px solid var(--accent);
+  }
+  .kpi-card.green  { border-left-color: var(--green); }
+  .kpi-card.red    { border-left-color: var(--red); }
+  .kpi-card.yellow { border-left-color: var(--yellow); }
+  .kpi-card.orange { border-left-color: var(--orange); }
+  .kpi-card.purple { border-left-color: var(--purple); }
+  .kpi-label { font-size: 0.7rem; color: var(--gray); margin-bottom: 4px; }
+  .kpi-value { font-size: 1.4rem; font-weight: 700; font-family: monospace; }
+  .kpi-value.green  { color: var(--green); }
+  .kpi-value.red    { color: var(--red); }
+  .kpi-value.yellow { color: var(--yellow); }
+  .kpi-value.orange { color: var(--orange); }
+  .kpi-value.purple { color: var(--purple); }
+  .kpi-value.accent { color: var(--accent); }
+  /* ── Table ── */
+  .tbl-wrap { overflow-x: auto; }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.75rem;
+  }
+  th {
+    background: #0a2040;
+    color: var(--yellow);
+    padding: 6px 8px;
+    text-align: right;
+    font-weight: 700;
+    white-space: nowrap;
+    position: sticky;
+    top: 0;
+  }
+  th:first-child { text-align: center; }
+  td {
+    padding: 5px 8px;
+    text-align: right;
+    border-bottom: 1px solid #1e2d4a;
+    font-family: monospace;
+    white-space: nowrap;
+  }
+  td:first-child { text-align: center; color: var(--accent); font-weight: 700; }
+  tr:nth-child(even) td { background: #1e2d4a; }
+  tr:hover td { background: #243550; }
+  td.green  { color: var(--green); }
+  td.orange { color: var(--orange); }
+  td.red    { color: var(--red); }
+  td.purple { color: var(--purple); }
+  td.yellow { color: var(--yellow); }
+  /* ── Chart containers ── */
+  .chart-box {
+    background: var(--panel-bg);
+    border: 1px solid #2a3a5a;
+    border-radius: 8px;
+    padding: 12px;
+    position: relative;
+  }
+  .chart-box h4 {
+    font-size: 0.78rem;
+    color: var(--white);
+    font-weight: 700;
+    margin-bottom: 8px;
+    text-align: center;
+  }
+  .chart-box canvas { max-height: 260px; }
+  /* ── Recommendations ── */
+  .rec-list { list-style: none; }
+  .rec-list li {
+    background: var(--btn-bg);
+    border-left: 4px solid var(--orange);
+    border-radius: 4px;
+    padding: 10px 14px;
+    margin-bottom: 8px;
+    font-size: 0.82rem;
+    line-height: 1.5;
+  }
+  /* ── Compare table ── */
+  .cmp-table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
+  .cmp-table th { background: #0a2040; color: var(--yellow); padding: 6px 10px; text-align: left; }
+  .cmp-table td { padding: 6px 10px; border-bottom: 1px solid #1e2d4a; }
+  .cmp-table td:nth-child(2) { color: var(--red); font-family: monospace; font-weight: 700; }
+  .cmp-table td:nth-child(3) { color: var(--green); font-family: monospace; font-weight: 700; }
+  /* ── Stats table ── */
+  .stats-tbl { width: 100%; border-collapse: collapse; font-size: 0.72rem; }
+  .stats-tbl th { background: #0a2040; color: var(--yellow); padding: 5px 7px; text-align: right; }
+  .stats-tbl th:first-child { text-align: left; }
+  .stats-tbl td { padding: 4px 7px; text-align: right; border-bottom: 1px solid #1e2d4a; font-family: monospace; }
+  .stats-tbl td:first-child { text-align: left; color: var(--gray); }
+  /* ── Loading ── */
+  #loading {
+    position: fixed; inset: 0;
+    background: var(--dark-bg);
+    display: flex; align-items: center; justify-content: center;
+    flex-direction: column; gap: 16px;
+    z-index: 9999;
+  }
+  #loading p { color: var(--accent); font-size: 1rem; }
+  .spinner {
+    width: 48px; height: 48px;
+    border: 4px solid #333;
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  /* ── Responsive ── */
+  @media (max-width: 900px) {
+    .grid-3, .grid-4, .grid-5 { grid-template-columns: 1fr 1fr; }
+    .col-span-2, .col-span-3 { grid-column: span 1; }
+  }
+  @media (max-width: 600px) {
+    .grid-2, .grid-3, .grid-4, .grid-5 { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<div id="loading">
+  <div class="spinner"></div>
+  <p>Cargando datos del dashboard...</p>
+</div>
+
+<header>
+  <div>
+    <h1>⛏ EX-5600 — Dashboard de Productividad</h1>
+    <div class="subtitle" id="meta-subtitle">Cargando...</div>
+  </div>
+  <div style="font-size:0.75rem; color:var(--gray)" id="meta-gen"></div>
+</header>
+
+<nav>
+  <button class="active" onclick="showView('metricas',this)">📊 Métricas Ciclo</button>
+  <button onclick="showView('relacion',this)">🔗 Relación Ciclos</button>
+  <button onclick="showView('productividad',this)">🏭 Productividad</button>
+  <button onclick="showView('optimo',this)">🏆 Ciclo Óptimo</button>
+  <button onclick="showView('gap',this)">📈 Gap de Mejora</button>
+  <button onclick="showView('recorrido',this)">🗺 Recorrido</button>
+</nav>
+
+<main>
+
+<!-- ═══════════════════════════════════════════════════════════════════════
+     VISTA 1 — MÉTRICAS CICLO
+═══════════════════════════════════════════════════════════════════════ -->
+<div id="view-metricas" class="view active">
+  <div class="grid-2" style="margin-bottom:14px">
+    <div class="chart-box col-span-2">
+      <h4>Score por Ciclo</h4>
+      <canvas id="chart-score"></canvas>
+    </div>
+  </div>
+  <div class="panel">
+    <h3>Métricas por Ciclo — Todos los Ciclos</h3>
+    <div class="tbl-wrap">
+      <table id="tbl-ciclos">
+        <thead>
+          <tr>
+            <th>#</th><th>Dur(s)</th><th>Esfuerzo</th><th>Pitch</th>
+            <th>Suavidad</th><th>T.Elev(s)</th><th>Peso(t)</th>
+            <th>Eficiencia</th><th>Costo</th><th>Score</th>
+            <th>Prod(t/hr)</th><th>Lado</th>
+          </tr>
+        </thead>
+        <tbody id="tbl-ciclos-body"></tbody>
+      </table>
+    </div>
+  </div>
+  <div class="panel" style="margin-top:14px">
+    <h3>Fórmulas de cada columna</h3>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;font-size:0.78rem">
+      <div><span style="color:var(--yellow);font-weight:700">Dur(s)</span> = t_fin − t_inicio</div>
+      <div><span style="color:var(--yellow);font-weight:700">Esfuerzo</span> = Σ acc_mag</div>
+      <div><span style="color:var(--yellow);font-weight:700">Pitch</span> = max(pitch) − min(pitch)</div>
+      <div><span style="color:var(--yellow);font-weight:700">Suavidad</span> = std(acc_mag)</div>
+      <div><span style="color:var(--yellow);font-weight:700">T.Elev(s)</span> = Σ dt donde diff(pitch)&gt;0</div>
+      <div><span style="color:var(--yellow);font-weight:700">Peso(t)</span> = Σ(acc_dyn×dt) en lifting, escalado a 52t</div>
+      <div><span style="color:var(--yellow);font-weight:700">Eficiencia</span> = (Pitch × Esfuerzo) / Duración</div>
+      <div><span style="color:var(--yellow);font-weight:700">Costo</span> = Duración × Esfuerzo</div>
+      <div><span style="color:var(--yellow);font-weight:700">Score</span> = 0.5×W_norm + 0.3×(1/T_norm) + 0.2×Eff_norm</div>
+      <div><span style="color:var(--yellow);font-weight:700">Prod(t/hr)</span> = (3600/Dur) × Peso(t)</div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════
+     VISTA 2 — RELACIÓN CICLOS
+═══════════════════════════════════════════════════════════════════════ -->
+<div id="view-relacion" class="view">
+  <div class="grid-2">
+    <div class="chart-box">
+      <h4>Duración por Ciclo (s)</h4>
+      <canvas id="chart-duracion"></canvas>
+    </div>
+    <div class="chart-box">
+      <h4>Distribución de Duración</h4>
+      <canvas id="chart-hist-dur"></canvas>
+    </div>
+  </div>
+  <div class="grid-2">
+    <div class="chart-box">
+      <h4>Gaps entre Ciclos (s)</h4>
+      <canvas id="chart-gaps"></canvas>
+    </div>
+    <div class="panel">
+      <h3>Estadísticas Descriptivas</h3>
+      <div class="tbl-wrap">
+        <table class="stats-tbl" id="tbl-stats"></table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════
+     VISTA 3 — PRODUCTIVIDAD GLOBAL
+═══════════════════════════════════════════════════════════════════════ -->
+<div id="view-productividad" class="view">
+  <div class="kpi-grid" id="kpi-grid"></div>
+  <div class="grid-3">
+    <div class="chart-box col-span-2">
+      <h4>Productividad por Ciclo (t/hr)</h4>
+      <canvas id="chart-prod-ciclo"></canvas>
+    </div>
+    <div class="panel">
+      <h3>Producción Total</h3>
+      <div id="prod-total-panel" style="font-size:0.85rem;line-height:2"></div>
+    </div>
+  </div>
+  <div class="grid-2">
+    <div class="chart-box">
+      <h4>Toneladas Estimadas por Ciclo</h4>
+      <canvas id="chart-tonnes"></canvas>
+    </div>
+    <div class="chart-box">
+      <h4>Costo por Ciclo</h4>
+      <canvas id="chart-cost"></canvas>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════
+     VISTA 4 — CICLO ÓPTIMO
+═══════════════════════════════════════════════════════════════════════ -->
+<div id="view-optimo" class="view">
+  <div class="grid-2">
+    <div class="chart-box col-span-2">
+      <h4 id="best-cycle-title">Señal del Mejor Ciclo Real</h4>
+      <canvas id="chart-best-signal"></canvas>
+    </div>
+  </div>
+  <div class="grid-2">
+    <div class="panel">
+      <h3>Mejor Real vs Ideal Realista</h3>
+      <table class="cmp-table" id="tbl-cmp"></table>
+    </div>
+    <div class="chart-box">
+      <h4>Frontera de Eficiencia: Duración vs Toneladas</h4>
+      <canvas id="chart-frontera"></canvas>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════
+     VISTA 5 — GAP DE MEJORA
+═══════════════════════════════════════════════════════════════════════ -->
+<div id="view-gap" class="view">
+  <div class="grid-5" id="gap-mini-charts">
+    <!-- 5 mini charts generados por JS -->
+  </div>
+  <div class="grid-2">
+    <div class="chart-box">
+      <h4>Producción Acumulada (t)</h4>
+      <canvas id="chart-prod-acum"></canvas>
+    </div>
+    <div class="chart-box">
+      <h4>Gaps: Real vs Optimizado (s)</h4>
+      <canvas id="chart-gaps-cmp"></canvas>
+    </div>
+  </div>
+  <div class="panel">
+    <h3>Resumen del Gap de Mejora</h3>
+    <div id="gap-resumen" style="display:grid;grid-template-columns:1fr 1fr;gap:10px;font-size:0.82rem;line-height:2"></div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════
+     VISTA 6 — RECORRIDO
+═══════════════════════════════════════════════════════════════════════ -->
+<div id="view-recorrido" class="view">
+  <div class="chart-box" style="margin-bottom:14px">
+    <h4>Recorrido Angular Acumulado — integral de gz (rad)</h4>
+    <canvas id="chart-gz-cum" style="max-height:220px"></canvas>
+  </div>
+  <div class="grid-2">
+    <div class="chart-box">
+      <h4>gz suavizado por ciclo (coloreado por lado)</h4>
+      <canvas id="chart-gz-ciclos"></canvas>
+    </div>
+    <div class="chart-box">
+      <h4>Ángulo total girado por ciclo |gz| integrado (rad)</h4>
+      <canvas id="chart-ang-ciclo"></canvas>
+    </div>
+  </div>
+</div>
+
+</main>
+
+<script>
+// ═══════════════════════════════════════════════════════════════════════════
+// Utilidades
+// ═══════════════════════════════════════════════════════════════════════════
+const C = {
+  accent: '#00d4ff', green: '#00ff88', red: '#ff6b6b',
+  yellow: '#ffd700', orange: '#ff9f43', purple: '#a29bfe',
+  white: '#ffffff', gray: '#aaaaaa', panelBg: '#16213e',
+};
+
+function fmt(v, dec=1) { return typeof v === 'number' ? v.toFixed(dec) : v; }
+function fmtK(v) { return v >= 1000 ? (v/1000).toFixed(1)+'k' : v.toFixed(0); }
+
+const chartDefaults = {
+  responsive: true,
+  maintainAspectRatio: true,
+  plugins: {
+    legend: { labels: { color: C.white, font: { size: 10 } } },
+    tooltip: { backgroundColor: '#0f3460', titleColor: C.yellow, bodyColor: C.white },
+  },
+  scales: {
+    x: { ticks: { color: C.gray, font: { size: 9 } }, grid: { color: '#2a3a5a' } },
+    y: { ticks: { color: C.gray, font: { size: 9 } }, grid: { color: '#2a3a5a' } },
+  },
+};
+
+function makeChart(id, type, data, options={}) {
+  const ctx = document.getElementById(id);
+  if (!ctx) return null;
+  return new Chart(ctx, {
+    type,
+    data,
+    options: { ...chartDefaults, ...options },
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Navegación
+// ═══════════════════════════════════════════════════════════════════════════
+function showView(name, btn) {
+  document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+  document.querySelectorAll('nav button').forEach(b => b.classList.remove('active'));
+  document.getElementById('view-' + name).classList.add('active');
+  if (btn) btn.classList.add('active');
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Cargar datos y construir dashboard
+// ═══════════════════════════════════════════════════════════════════════════
+async function loadData() {
+  let D;
+  try {
+    const resp = await fetch('outputs/dashboard_data.json');
+    if (!resp.ok) throw new Error('No se pudo cargar outputs/dashboard_data.json');
+    D = await resp.json();
+  } catch(e) {
+    document.getElementById('loading').innerHTML =
+      `<p style="color:var(--red);text-align:center;padding:20px">
+        ❌ Error: ${e.message}<br><br>
+        <small>Ejecuta primero: <code>python export_dashboard.py</code><br>
+        Luego abre este archivo con un servidor local o desde VS Code Live Server.</small>
+      </p>`;
+    return;
+  }
+
+  document.getElementById('loading').style.display = 'none';
+
+  // Meta
+  document.getElementById('meta-subtitle').textContent =
+    `${D.meta.total_samples} muestras · ${D.meta.duration_min.toFixed(1)} min · ${D.meta.sample_freq_hz} Hz`;
+  document.getElementById('meta-gen').textContent =
+    'Generado: ' + D.meta.generated_at.slice(0,19);
+
+  buildMetricas(D);
+  buildRelacion(D);
+  buildProductividad(D);
+  buildOptimo(D);
+  buildGap(D);
+  buildRecorrido(D);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// VISTA 1 — Métricas Ciclo
+// ═══════════════════════════════════════════════════════════════════════════
+function buildMetricas(D) {
+  const cycles = D.all_cycles;
+  const avgScore = cycles.reduce((s,c) => s + c.score, 0) / cycles.length;
+
+  // Tabla
+  const tbody = document.getElementById('tbl-ciclos-body');
+  cycles.forEach(c => {
+    const tr = document.createElement('tr');
+    const scoreColor = c.score >= avgScore ? 'green' : 'orange';
+    tr.innerHTML = `
+      <td>${c.cycle}</td>
+      <td>${fmt(c.duration)}</td>
+      <td>${fmt(c.effort,0)}</td>
+      <td>${fmt(c.pitch_range,3)}</td>
+      <td>${fmt(c.smoothness,3)}</td>
+      <td>${fmt(c.lifting_time,1)}</td>
+      <td class="green">${fmt(c.tonnes,1)}</td>
+      <td>${fmt(c.efficiency,2)}</td>
+      <td class="purple">${fmt(c.cost,0)}</td>
+      <td class="${scoreColor}">${fmt(c.score,3)}</td>
+      <td>${fmt(c.productivity_cycle,0)}</td>
+      <td style="color:var(--orange)">${c.side}</td>
+    `;
+    tbody.appendChild(tr);
+  });
+
+  // Gráfico score
+  const scoreColors = cycles.map(c => c.score >= avgScore ? C.green : C.red);
+  makeChart('chart-score', 'bar', {
+    labels: cycles.map(c => `C${c.cycle}`),
+    datasets: [{
+      label: 'Score',
+      data: cycles.map(c => c.score),
+      backgroundColor: scoreColors,
+      borderRadius: 3,
+    }, {
+      label: `Media ${fmt(avgScore,3)}`,
+      data: cycles.map(() => avgScore),
+      type: 'line',
+      borderColor: C.yellow,
+      borderDash: [5,3],
+      borderWidth: 2,
+      pointRadius: 0,
+      fill: false,
+    }],
+  }, { plugins: { ...chartDefaults.plugins } });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// VISTA 2 — Relación Ciclos
+// ═══════════════════════════════════════════════════════════════════════════
+function buildRelacion(D) {
+  const cycles = D.all_cycles;
+  const avgDur = D.real.avg_cycle_sec;
+
+  // Duración por ciclo
+  makeChart('chart-duracion', 'bar', {
+    labels: cycles.map(c => `C${c.cycle}`),
+    datasets: [{
+      label: 'Duración (s)',
+      data: cycles.map(c => c.duration),
+      backgroundColor: cycles.map(c => c.duration <= avgDur ? C.green : C.red),
+      borderRadius: 3,
+    }, {
+      label: `Media ${fmt(avgDur)}s`,
+      data: cycles.map(() => avgDur),
+      type: 'line',
+      borderColor: C.yellow,
+      borderDash: [5,3],
+      borderWidth: 2,
+      pointRadius: 0,
+      fill: false,
+    }],
+  });
+
+  // Histograma duración
+  const durs = cycles.map(c => c.duration);
+  const minD = Math.min(...durs), maxD = Math.max(...durs);
+  const bins = 12;
+  const binW = (maxD - minD) / bins;
+  const counts = Array(bins).fill(0);
+  const labels = [];
+  for (let i = 0; i < bins; i++) labels.push(fmt(minD + i * binW) + '-' + fmt(minD + (i+1)*binW));
+  durs.forEach(d => {
+    const idx = Math.min(Math.floor((d - minD) / binW), bins - 1);
+    counts[idx]++;
+  });
+  makeChart('chart-hist-dur', 'bar', {
+    labels,
+    datasets: [{ label: 'Frecuencia', data: counts, backgroundColor: C.purple, borderRadius: 3 }],
+  }, { plugins: { ...chartDefaults.plugins }, scales: {
+    x: { ticks: { color: C.gray, font: { size: 7 }, maxRotation: 45 }, grid: { color: '#2a3a5a' } },
+    y: { ticks: { color: C.gray, font: { size: 9 } }, grid: { color: '#2a3a5a' } },
+  }});
+
+  // Gaps
+  const gaps = D.gaps_real;
+  const medGap = D.real.median_gap_sec;
+  makeChart('chart-gaps', 'bar', {
+    labels: gaps.map((_,i) => `G${i+1}`),
+    datasets: [{
+      label: 'Gap (s)',
+      data: gaps,
+      backgroundColor: gaps.map(g => g <= medGap ? C.green : C.red),
+      borderRadius: 3,
+    }, {
+      label: `Mediana ${fmt(medGap)}s`,
+      data: gaps.map(() => medGap),
+      type: 'line',
+      borderColor: C.yellow,
+      borderDash: [5,3],
+      borderWidth: 2,
+      pointRadius: 0,
+      fill: false,
+    }],
+  });
+
+  // Tabla estadísticas
+  const stats = D.stats;
+  const cols = ['duration','effort','pitch_range','smoothness','lifting_time','tonnes','efficiency','cost','score'];
+  const colLabels = ['Dur','Esf','Pitch','Suav','T.El','Ton','Efic','Cost','Score'];
+  const rows = ['mean','std','min','25%','50%','75%','max'];
+  const tbl = document.getElementById('tbl-stats');
+  let html = '<thead><tr><th>Stat</th>' + colLabels.map(l => `<th>${l}</th>`).join('') + '</tr></thead><tbody>';
+  rows.forEach(r => {
+    html += `<tr><td>${r}</td>` + cols.map(c => `<td>${fmt(stats[c][r],2)}</td>`).join('') + '</tr>';
+  });
+  html += '</tbody>';
+  tbl.innerHTML = html;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// VISTA 3 — Productividad Global
+// ═══════════════════════════════════════════════════════════════════════════
+function buildProductividad(D) {
+  const r = D.real;
+  const kpis = [
+    { label: 'Ciclos Totales',      value: r.total_cycles,                    unit: '',      color: 'accent' },
+    { label: 'Ciclos / hora',       value: fmt(r.cycles_per_hour),             unit: '',      color: 'yellow' },
+    { label: 'Utilización',         value: fmt(r.utilization_pct) + '%',       unit: '',      color: r.utilization_pct >= 75 ? 'green' : 'red' },
+    { label: 'Tiempo Muerto',       value: fmt(r.idle_ratio_pct) + '%',        unit: '',      color: r.idle_ratio_pct <= 15 ? 'green' : 'red' },
+    { label: 'Duración Media',      value: fmt(r.avg_cycle_sec) + ' s',        unit: '',      color: 'white' },
+    { label: 'Mejor Ciclo (≥10s)',  value: fmt(r.best_cycle_sec) + ' s',       unit: '',      color: 'green' },
+    { label: 'Peor Ciclo',          value: fmt(r.worst_cycle_sec) + ' s',      unit: '',      color: 'red' },
+    { label: 'Consistencia (CV)',   value: fmt(r.consistency_cv, 3),           unit: '',      color: r.consistency_cv <= 0.15 ? 'green' : 'orange' },
+    { label: 'Gap Mediano',         value: fmt(r.median_gap_sec) + ' s',       unit: '',      color: 'green' },
+    { label: 'Gap P90',             value: fmt(r.p90_gap_sec) + ' s',          unit: '',      color: 'orange' },
+    { label: 'Toneladas / hora',    value: fmt(r.tonnes_per_hour) + ' t',      unit: '',      color: 'yellow' },
+    { label: 'Costo / tonelada',    value: fmt(r.cost_per_tonne, 2),           unit: '',      color: 'purple' },
+  ];
+
+  const grid = document.getElementById('kpi-grid');
+  kpis.forEach(k => {
+    const div = document.createElement('div');
+    div.className = `kpi-card ${k.color}`;
+    div.innerHTML = `<div class="kpi-label">${k.label}</div><div class="kpi-value ${k.color}">${k.value}</div>`;
+    grid.appendChild(div);
+  });
+
+  // Panel producción
+  const tph = r.tonnes_per_hour;
+  document.getElementById('prod-total-panel').innerHTML = `
+    <div><span style="color:var(--gray)">t/hora:</span> <strong style="color:var(--green)">${fmt(tph)} t</strong></div>
+    <div><span style="color:var(--gray)">t/día (20h):</span> <strong style="color:var(--orange)">${fmt(tph*20,0)} t</strong></div>
+    <div><span style="color:var(--gray)">t totales:</span> <strong style="color:var(--white)">${fmt(r.total_tonnes,0)} t</strong></div>
+    <div><span style="color:var(--gray)">Costo total:</span> <strong style="color:var(--purple)">${fmtK(r.total_cost)}</strong></div>
+    <div><span style="color:var(--gray)">Costo/t:</span> <strong style="color:var(--purple)">${fmt(r.cost_per_tonne,2)}</strong></div>
+  `;
+
+  const cycles = D.all_cycles;
+  const avgProd = cycles.reduce((s,c) => s + c.productivity_cycle, 0) / cycles.length;
+
+  // Productividad por ciclo
+  makeChart('chart-prod-ciclo', 'line', {
+    labels: cycles.map(c => `C${c.cycle}`),
+    datasets: [{
+      label: 'Prod (t/hr)',
+      data: cycles.map(c => c.productivity_cycle),
+      borderColor: C.orange,
+      backgroundColor: C.orange + '33',
+      fill: true,
+      tension: 0.3,
+      pointRadius: 3,
+    }, {
+      label: `Media ${fmt(avgProd,0)} t/hr`,
+      data: cycles.map(() => avgProd),
+      borderColor: C.yellow,
+      borderDash: [5,3],
+      borderWidth: 2,
+      pointRadius: 0,
+      fill: false,
+    }],
+  });
+
+  // Toneladas
+  const avgT = r.avg_tonnes;
+  makeChart('chart-tonnes', 'bar', {
+    labels: cycles.map(c => `C${c.cycle}`),
+    datasets: [{
+      label: 'Toneladas',
+      data: cycles.map(c => c.tonnes),
+      backgroundColor: cycles.map(c => c.tonnes >= avgT ? C.green : C.red),
+      borderRadius: 3,
+    }, {
+      label: `Nominal ${D.meta.bucket_tonnes}t`,
+      data: cycles.map(() => D.meta.bucket_tonnes),
+      type: 'line',
+      borderColor: C.green,
+      borderDash: [5,3],
+      borderWidth: 1.5,
+      pointRadius: 0,
+      fill: false,
+    }],
+  });
+
+  // Costo
+  const avgCost = cycles.reduce((s,c) => s + c.cost, 0) / cycles.length;
+  makeChart('chart-cost', 'bar', {
+    labels: cycles.map(c => `C${c.cycle}`),
+    datasets: [{
+      label: 'Costo',
+      data: cycles.map(c => c.cost),
+      backgroundColor: cycles.map(c => c.cost <= avgCost ? C.green : C.red),
+      borderRadius: 3,
+    }],
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// VISTA 4 — Ciclo Óptimo
+// ═══════════════════════════════════════════════════════════════════════════
+function buildOptimo(D) {
+  const br = D.best_real;
+  const ideal = D.ideal;
+  const sig = D.best_cycle_signal;
+
+  document.getElementById('best-cycle-title').textContent =
+    `Señal del Mejor Ciclo Real — Ciclo #${br.cycle} (score=${fmt(br.score,3)}, dur=${fmt(br.duration)}s, lado=${br.side||'—'})`;
+
+  // Señal del mejor ciclo
+  makeChart('chart-best-signal', 'line', {
+    labels: sig.time.map(t => fmt(t)),
+    datasets: [
+      { label: 'gz suavizado', data: sig.gz_smooth, borderColor: C.accent, borderWidth: 1.5, pointRadius: 0, fill: false, tension: 0.2 },
+      { label: 'pitch (rad)',  data: sig.pitch,     borderColor: C.orange, borderWidth: 1.5, pointRadius: 0, fill: false, tension: 0.2 },
+      { label: 'acc_dyn (norm)', data: sig.acc_dynamic_norm, borderColor: C.purple, borderWidth: 1, pointRadius: 0, fill: false, tension: 0.2, borderDash: [3,2] },
+    ],
+  }, { scales: {
+    x: { ticks: { color: C.gray, font: { size: 8 }, maxTicksLimit: 12 }, grid: { color: '#2a3a5a' } },
+    y: { ticks: { color: C.gray, font: { size: 9 } }, grid: { color: '#2a3a5a' } },
+  }});
+
+  // Tabla comparativa
+  const rows = [
+    ['Duración (s)',   fmt(br.duration),                fmt(ideal.duration)],
+    ['Toneladas',      fmt(br.tonnes,1),                fmt(ideal.tonnes,1)],
+    ['Eficiencia',     fmt(br.efficiency,2),            fmt(ideal.efficiency,2)],
+    ['Peso proxy',     fmt(br.weight_proxy,2),          fmt(ideal.weight_proxy,2)],
+    ['Score',          fmt(br.score,3),                 '—'],
+    ['Ciclos/hr',      fmt(3600/br.duration,0),         fmt(ideal.cph,0)],
+    ['t/hr (ciclo)',   fmt(br.productivity_cycle,0),    fmt(ideal.tph,0)],
+  ];
+  const tbl = document.getElementById('tbl-cmp');
+  tbl.innerHTML = '<thead><tr><th>Métrica</th><th>Mejor Real</th><th>Ideal (' + D.ideal_note + ')</th></tr></thead><tbody>' +
+    rows.map(r => `<tr><td>${r[0]}</td><td>${r[1]}</td><td>${r[2]}</td></tr>`).join('') +
+    '</tbody>';
+
+  // Scatter frontera
+  const cycles = D.all_cycles;
+  const scoreMin = Math.min(...cycles.map(c => c.score));
+  const scoreMax = Math.max(...cycles.map(c => c.score));
+  const scatterData = cycles.map(c => ({
+    x: c.duration,
+    y: c.tonnes,
+    score: c.score,
+  }));
+  const scatterColors = scatterData.map(p => {
+    const t = (p.score - scoreMin) / (scoreMax - scoreMin || 1);
+    const r = Math.round(255 * (1 - t));
+    const g = Math.round(255 * t);
+    return `rgba(${r},${g},80,0.85)`;
+  });
+
+  makeChart('chart-frontera', 'scatter', {
+    datasets: [
+      {
+        label: 'Ciclos',
+        data: scatterData,
+        backgroundColor: scatterColors,
+        pointRadius: 7,
+      },
+      {
+        label: `Mejor real #${br.cycle}`,
+        data: [{ x: br.duration, y: br.tonnes }],
+        backgroundColor: C.green,
+        pointRadius: 12,
+        pointStyle: 'star',
+      },
+      {
+        label: `Ideal (${D.ideal_note})`,
+        data: [{ x: ideal.duration, y: ideal.tonnes }],
+        backgroundColor: C.yellow,
+        pointRadius: 10,
+        pointStyle: 'diamond',
+      },
+    ],
+  }, { scales: {
+    x: { title: { display: true, text: 'Duración (s)', color: C.gray }, ticks: { color: C.gray, font: { size: 9 } }, grid: { color: '#2a3a5a' } },
+    y: { title: { display: true, text: 'Toneladas', color: C.gray }, ticks: { color: C.gray, font: { size: 9 } }, grid: { color: '#2a3a5a' } },
+  }});
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// VISTA 5 — Gap de Mejora
+// ═══════════════════════════════════════════════════════════════════════════
+function buildGap(D) {
+  const r = D.real, opt = D.opt, ideal = D.ideal;
+
+  // 5 mini charts separados
+  const miniDefs = [
+    { label: 'Ciclos/hr',      vals: [r.cycles_per_hour, opt.cycles_per_hour, ideal.cph],          unit: '' },
+    { label: 'Utilización %',  vals: [r.utilization_pct, opt.utilization_pct, 85],                 unit: '%' },
+    { label: 't/hr',           vals: [r.tonnes_per_hour, opt.opt_tph, ideal.tph],                  unit: 't' },
+    { label: 'Ciclo prom (s)', vals: [r.avg_cycle_sec, opt.avg_cycle_sec, ideal.duration],         unit: 's' },
+    { label: 'Gap med (s)',    vals: [r.median_gap_sec, r.median_gap_sec, r.median_gap_sec],        unit: 's' },
+  ];
+
+  const container = document.getElementById('gap-mini-charts');
+  miniDefs.forEach((def, i) => {
+    const box = document.createElement('div');
+    box.className = 'chart-box';
+    box.innerHTML = `<h4>${def.label}</h4><canvas id="mini-chart-${i}" style="max-height:180px"></canvas>`;
+    container.appendChild(box);
+  });
+
+  miniDefs.forEach((def, i) => {
+    makeChart(`mini-chart-${i}`, 'bar', {
+      labels: ['Real', 'Opt.', 'Ideal'],
+      datasets: [{
+        data: def.vals,
+        backgroundColor: [C.red, C.orange, C.green],
+        borderRadius: 4,
+      }],
+    }, {
+      plugins: {
+        legend: { display: false },
+        tooltip: { callbacks: { label: ctx => fmt(ctx.raw,1) + def.unit } },
+      },
+      scales: {
+        x: { ticks: { color: C.white, font: { size: 9 } }, grid: { color: '#2a3a5a' } },
+        y: { ticks: { color: C.gray, font: { size: 8 } }, grid: { color: '#2a3a5a' } },
+      },
+    });
+  });
+
+  // Producción acumulada
+  const pa = D.prod_acum;
+  makeChart('chart-prod-acum', 'line', {
+    labels: pa.cycles,
+    datasets: [
+      { label: `Real (${fmt(r.tonnes_per_hour,0)} t/hr)`,  data: pa.real,  borderColor: C.red,    fill: false, tension: 0.1, pointRadius: 0, borderWidth: 2 },
+      { label: `Opt. (${fmt(opt.opt_tph,0)} t/hr)`,        data: pa.opt,   borderColor: C.orange, fill: false, tension: 0.1, pointRadius: 0, borderWidth: 2, borderDash: [5,3] },
+      { label: `Ideal (${fmt(ideal.tph,0)} t/hr)`,         data: pa.ideal, borderColor: C.green,  fill: false, tension: 0.1, pointRadius: 0, borderWidth: 2, borderDash: [3,2] },
+    ],
+  });
+
+  // Gaps real vs optimizado (sin línea objetivo)
+  const gapsR = D.gaps_real;
+  const gapsO = D.gaps_opt;
+  makeChart('chart-gaps-cmp', 'bar', {
+    labels: gapsR.map((_,i) => `G${i+1}`),
+    datasets: [
+      { label: 'Real',       data: gapsR, backgroundColor: C.red + 'cc',   borderRadius: 2 },
+      { label: 'Optimizado', data: gapsO, backgroundColor: C.green + 'cc', borderRadius: 2 },
+    ],
+  });
+
+  // Resumen
+  const deltaIdeal = ideal.tph - r.tonnes_per_hour;
+  document.getElementById('gap-resumen').innerHTML = `
+    <div>
+      <div style="color:var(--yellow);font-weight:700;margin-bottom:4px">— LOGÍSTICO —</div>
+      <div><span style="color:var(--gray)">Reducción gaps:</span> <strong>${fmt(opt.gap_reduction_sec,2)} s/ciclo</strong></div>
+      <div><span style="color:var(--gray)">Ciclos extra/hr:</span> <strong>+${fmt(opt.extra_cycles_per_hour,2)}</strong></div>
+      <div><span style="color:var(--green)">Delta t/hr:</span> <strong style="color:var(--green)">+${fmt(opt.delta_tph,0)} t (+${fmt(opt.delta_pct,1)}%)</strong></div>
+      <div><span style="color:var(--orange)">Delta t/día:</span> <strong style="color:var(--orange)">+${fmt(opt.delta_tpd,0)} t</strong></div>
+    </div>
+    <div>
+      <div style="color:var(--yellow);font-weight:700;margin-bottom:4px">— IDEAL REALISTA —</div>
+      <div><span style="color:var(--gray)">Duración obj:</span> <strong>${fmt(ideal.duration)} s (${D.ideal_note})</strong></div>
+      <div><span style="color:var(--gray)">t/hr ideal:</span> <strong style="color:var(--green)">${fmt(ideal.tph,0)} t</strong></div>
+      <div><span style="color:var(--green)">Delta t/hr:</span> <strong style="color:var(--green)">+${fmt(deltaIdeal,0)} t</strong></div>
+      <div><span style="color:var(--orange)">Delta t/día:</span> <strong style="color:var(--orange)">+${fmt(deltaIdeal*D.meta.horas_operacion,0)} t</strong></div>
+    </div>
+  `;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// VISTA 6 — Recorrido
+// ═══════════════════════════════════════════════════════════════════════════
+function buildRecorrido(D) {
+  const sig = D.signals;
+  const cycles = D.all_cycles;
+
+  // gz acumulado con anotaciones de inicio de ciclo
+  const annotations = {};
+  D.cycle_starts.forEach((ts, i) => {
+    // Encontrar índice más cercano en sig.time
+    let closest = 0;
+    let minDiff = Infinity;
+    sig.time.forEach((t, j) => {
+      const diff = Math.abs(t - ts);
+      if (diff < minDiff) { minDiff = diff; closest = j; }
+    });
+    const color = D.cycle_sides[i] === 'izquierda' ? C.green : C.orange;
+    annotations[`cycle_${i}`] = {
+      type: 'line',
+      xMin: closest, xMax: closest,
+      borderColor: color + '88',
+      borderWidth: 1,
+    };
+  });
+
+  makeChart('chart-gz-cum', 'line', {
+    labels: sig.time.map(t => fmt(t)),
+    datasets: [{
+      label: 'gz acumulado (rad)',
+      data: sig.gz_cumsum,
+      borderColor: C.accent,
+      backgroundColor: C.accent + '22',
+      fill: true,
+      tension: 0.2,
+      pointRadius: 0,
+      borderWidth: 1.5,
+    }],
+  }, {
+    scales: {
+      x: { ticks: { color: C.gray, font: { size: 8 }, maxTicksLimit: 15 }, grid: { color: '#2a3a5a' } },
+      y: { ticks: { color: C.gray, font: { size: 9 } }, grid: { color: '#2a3a5a' } },
+    },
+  });
+
+  // gz por ciclo coloreado por lado
+  // Construir datasets por lado
+  const leftData = sig.gz_smooth.map((v, i) => {
+    const t = sig.time[i];
+    // Verificar si este punto pertenece a un ciclo izquierda
+    for (let ci = 0; ci < D.cycle_starts.length; ci++) {
+      const ts = D.cycle_starts[ci];
+      const te = ci + 1 < D.cycle_starts.length ? D.cycle_starts[ci+1] : sig.time[sig.time.length-1];
+      if (t >= ts && t <= te && D.cycle_sides[ci] === 'izquierda') return v;
+    }
+    return null;
+  });
+  const rightData = sig.gz_smooth.map((v, i) => {
+    const t = sig.time[i];
+    for (let ci = 0; ci < D.cycle_starts.length; ci++) {
+      const ts = D.cycle_starts[ci];
+      const te = ci + 1 < D.cycle_starts.length ? D.cycle_starts[ci+1] : sig.time[sig.time.length-1];
+      if (t >= ts && t <= te && D.cycle_sides[ci] === 'derecha') return v;
+    }
+    return null;
+  });
+
+  makeChart('chart-gz-ciclos', 'line', {
+    labels: sig.time.map(t => fmt(t)),
+    datasets: [
+      { label: 'Izquierda', data: leftData,  borderColor: C.green,  borderWidth: 1, pointRadius: 0, fill: false, tension: 0.1, spanGaps: false },
+      { label: 'Derecha',   data: rightData, borderColor: C.orange, borderWidth: 1, pointRadius: 0, fill: false, tension: 0.1, spanGaps: false },
+    ],
+  }, {
+    scales: {
+      x: { ticks: { color: C.gray, font: { size: 8 }, maxTicksLimit: 15 }, grid: { color: '#2a3a5a' } },
+      y: { ticks: { color: C.gray, font: { size: 9 } }, grid: { color: '#2a3a5a' } },
+    },
+  });
+
+  // Ángulo total por ciclo
+  const angColors = D.cycle_sides.map(s => s === 'izquierda' ? C.green : C.orange);
+  const avgAng = D.ang_per_cycle.reduce((a,b) => a+b, 0) / D.ang_per_cycle.length;
+  makeChart('chart-ang-ciclo', 'bar', {
+    labels: cycles.map(c => `C${c.cycle}`),
+    datasets: [{
+      label: 'Ángulo total (rad)',
+      data: D.ang_per_cycle,
+      backgroundColor: angColors,
+      borderRadius: 3,
+    }, {
+      label: `Media ${fmt(avgAng,1)} rad`,
+      data: D.ang_per_cycle.map(() => avgAng),
+      type: 'line',
+      borderColor: C.yellow,
+      borderDash: [5,3],
+      borderWidth: 2,
+      pointRadius: 0,
+      fill: false,
+    }],
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Recomendaciones (footer en todas las vistas)
+// ═══════════════════════════════════════════════════════════════════════════
+function buildRecommendations(D) {
+  // Añadir panel de recomendaciones al final de productividad
+  const main = document.querySelector('main');
+  const recDiv = document.createElement('div');
+  recDiv.id = 'rec-panel';
+  recDiv.className = 'panel';
+  recDiv.style.marginTop = '14px';
+  recDiv.innerHTML = '<h3>💡 Recomendaciones</h3><ul class="rec-list" id="rec-list"></ul>';
+  document.getElementById('view-productividad').appendChild(recDiv);
+
+  const ul = document.getElementById('rec-list');
+  D.recommendations.forEach(r => {
+    const li = document.createElement('li');
+    li.textContent = r;
+    ul.appendChild(li);
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Init
+// ═══════════════════════════════════════════════════════════════════════════
+loadData().then(() => {
+  // Recomendaciones se añaden después de que el DOM esté listo
+  fetch('outputs/dashboard_data.json')
+    .then(r => r.json())
+    .then(D => buildRecommendations(D))
+    .catch(() => {});
+});
+</script>
+</body>
+</html>
