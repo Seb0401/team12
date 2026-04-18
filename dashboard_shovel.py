@@ -1,18 +1,19 @@
 """
 EX-5600 Shovel — Dashboard Interactivo de Productividad
 ========================================================
-5 vistas navegables con botones:
+6 vistas navegables con botones:
 
-  [1] Metricas por Ciclo   — tabla detallada + explicacion de columnas
-  [2] Relacion Ciclos      — estadisticas descriptivas + gaps entre ciclos
-  [3] Productividad Global — KPIs OEE, toneladas, costo, idle
-  [4] Ciclo Optimo         — mejor real vs ideal realista + frontera
-  [5] Gap de Mejora        — escenario optimizado logistico
+  [1] Metricas Ciclo   — tabla detallada + explicacion de columnas
+  [2] Relacion Ciclos  — estadisticas descriptivas + gaps
+  [3] Productividad    — KPIs OEE, toneladas, costo
+  [4] Ciclo Optimo     — mejor real vs ideal realista + frontera
+  [5] Gap de Mejora    — escenario optimizado logistico
+  [6] Recorrido        — trayectoria gz real vs optimizada
 
 Uso:
-    python productivity_report.py
-    python productivity_report.py --imu ruta/al/archivo.npy
-    python productivity_report.py --no-gui
+    python dashboard_shovel.py
+    python dashboard_shovel.py --imu ruta/al/archivo.npy
+    python dashboard_shovel.py --no-gui
 """
 
 import argparse
@@ -20,8 +21,10 @@ import glob
 import json
 from pathlib import Path
 
-import matplotlib.gridspec as gridspec
+import matplotlib
+matplotlib.use("TkAgg")
 import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
 from matplotlib.widgets import Button
 import numpy as np
 import pandas as pd
@@ -42,12 +45,13 @@ IDLE_THRESHOLD   = 0.3
 BUCKET_TONNES    = 52.0
 HORAS_OPERACION  = 20
 
-TARGET_UTILIZATION_PCT = 85.0
-TARGET_MAX_GAP_SEC     = 8.0
+# Ciclos por lado antes de cambiar (el brazo alterna cada 7 depositos)
+CICLOS_POR_LADO = 7
 
-# Percentil para ciclo ideal realista (evita outliers de duracion minima)
-IDEAL_DURATION_PERCENTILE = 10   # p10 de duracion = rapido pero alcanzable
-IDEAL_WEIGHT_PERCENTILE   = 90   # p90 de peso = carga alta pero alcanzable
+TARGET_UTILIZATION_PCT    = 85.0
+TARGET_MAX_GAP_SEC        = 8.0
+IDEAL_DURATION_PERCENTILE = 10
+IDEAL_WEIGHT_PERCENTILE   = 90
 
 DARK_BG  = "#1a1a2e"
 PANEL_BG = "#16213e"
@@ -130,10 +134,12 @@ def detectar_ciclos(df):
 
     cycles = []
     for i in range(len(valid) - 1):
-        s, e = valid[i][0], valid[i + 1][0]
+        s = valid[i][0]
+        e = valid[i + 1][0]
         cyc = df.iloc[s:e].copy()
-        if (cyc["gz_smooth"] < -GZ_THRESHOLD).sum() > 20 or \
-           (cyc["gz_smooth"] > GZ_THRESHOLD).sum() > 20:
+        has_right = (cyc["gz_smooth"] < -GZ_THRESHOLD).sum() > 20
+        has_left  = (cyc["gz_smooth"] > GZ_THRESHOLD).sum() > 20
+        if has_right or has_left:
             cycles.append(cyc)
 
     return cycles, valid
@@ -144,47 +150,56 @@ def detectar_ciclos(df):
 # ---------------------------------------------------------------------------
 
 def calcular_metricas(cycles):
+    """
+    El brazo alterna de lado cada CICLOS_POR_LADO depositos:
+      ciclos 0..6  -> lado A (izquierda)
+      ciclos 7..13 -> lado B (derecha)
+      ciclos 14..20-> lado A (izquierda)
+      ...
+    Esto corrige el error de deteccion de lado basado en gz_smooth.mean()
+    que puede ser incorrecto cuando el ciclo contiene movimiento bidireccional.
+    """
     rows = []
+    cycle_count = 0   # contador de ciclos validos (para asignar lado correcto)
     for i, cyc in enumerate(cycles):
-        t_start = cyc["time"].iloc[0]
-        t_end   = cyc["time"].iloc[-1]
+        t_start = float(cyc["time"].iloc[0])
+        t_end   = float(cyc["time"].iloc[-1])
         dur     = t_end - t_start
-        dt_arr  = cyc["time"].diff().fillna(0).values
+        if dur < 5.0:
+            continue
 
+        dt_arr       = cyc["time"].diff().fillna(0).values
         effort       = float(cyc["acc_mag"].sum())
         pitch_range  = float(cyc["pitch"].max() - cyc["pitch"].min())
         smoothness   = float(cyc["acc_mag"].std())
-        dt_mean      = cyc["time"].diff().mean()
-        lifting_mask = cyc["pitch"].diff() > 0
+        dt_mean      = float(cyc["time"].diff().mean())
+        lifting_mask = (cyc["pitch"].diff() > 0).values
         lifting_time = float(lifting_mask.sum() * dt_mean
                              if not np.isnan(dt_mean) else 0.0)
-
         acc_dyn      = cyc["acc_dynamic"].values
-        weight_proxy = float(np.sum(acc_dyn[lifting_mask.values] *
-                                    dt_arr[lifting_mask.values]))
+        weight_proxy = float(np.sum(acc_dyn[lifting_mask] * dt_arr[lifting_mask]))
 
-        side = "izquierda" if cyc["gz_smooth"].mean() > 0 else "derecha"
+        # Lado determinado por posicion en la secuencia (cada 7 ciclos alterna)
+        side = "izquierda" if (cycle_count // CICLOS_POR_LADO) % 2 == 0 else "derecha"
+
         eff  = (pitch_range * effort) / dur if dur > 0 else 0.0
         cost = dur * effort
 
         rows.append({
-            "cycle":        i,
-            "t_start":      t_start,
-            "t_end":        t_end,
-            "duration":     dur,
-            "effort":       effort,
-            "pitch_range":  pitch_range,
-            "smoothness":   smoothness,
-            "lifting_time": lifting_time,
-            "weight_proxy": weight_proxy,
-            "side":         side,
-            "efficiency":   eff,
-            "cost":         cost,
+            "cycle": cycle_count, "t_start": t_start, "t_end": t_end,
+            "duration": dur, "effort": effort, "pitch_range": pitch_range,
+            "smoothness": smoothness, "lifting_time": lifting_time,
+            "weight_proxy": weight_proxy, "side": side,
+            "efficiency": eff, "cost": cost,
         })
+        cycle_count += 1
 
     res = pd.DataFrame(rows)
     if len(res) == 0:
         return res
+
+    res = res.reset_index(drop=True)
+    res["cycle"] = res.index
 
     w_max   = res["weight_proxy"].max() or 1.0
     t_max   = res["duration"].max()     or 1.0
@@ -194,13 +209,12 @@ def calcular_metricas(cycles):
     res["t_norm"]   = res["duration"]     / t_max
     res["eff_norm"] = res["efficiency"]   / eff_max
 
-    t_inv_norm   = (1.0 / res["t_norm"]) / (1.0 / res["t_norm"]).max()
-    res["score"] = (0.5 * res["w_norm"] +
-                    0.3 * t_inv_norm +
-                    0.2 * res["eff_norm"])
+    t_inv      = 1.0 / res["t_norm"]
+    t_inv_norm = t_inv / t_inv.max()
+    res["score"] = 0.5 * res["w_norm"] + 0.3 * t_inv_norm + 0.2 * res["eff_norm"]
 
     res["tonnes"]             = res["weight_proxy"] * (BUCKET_TONNES / w_max)
-    res["cycle_rate"]         = 3600.0 / res["duration"].replace(0, np.nan)
+    res["cycle_rate"]         = 3600.0 / res["duration"]
     res["productivity_cycle"] = res["cycle_rate"] * res["tonnes"]
 
     return res
@@ -211,41 +225,44 @@ def calcular_metricas(cycles):
 # ---------------------------------------------------------------------------
 
 def calcular_productividad(df, cycles, res):
-    total_t = df["time"].iloc[-1] - df["time"].iloc[0]
+    total_t = float(df["time"].iloc[-1] - df["time"].iloc[0])
     total_h = total_t / 3600.0 if total_t > 0 else 1e-9
-    cph     = len(cycles) / total_h
+    cph     = len(res) / total_h
 
-    dt     = df["time"].diff().mean()
-    idle_t = df["idle"].sum() * (dt if not np.isnan(dt) else 0.0)
+    dt     = float(df["time"].diff().mean())
+    idle_t = float(df["idle"].sum()) * (dt if not np.isnan(dt) else 0.0)
     idle_r = idle_t / total_t if total_t > 0 else 0.0
     util   = max(0.0, 1.0 - idle_r)
 
-    gaps = [cycles[i+1]["time"].iloc[0] - cycles[i]["time"].iloc[-1]
-            for i in range(len(cycles) - 1)]
+    valid_cycles = [cycles[int(r["cycle"])] for _, r in res.iterrows()
+                    if int(r["cycle"]) < len(cycles)]
+    gaps = [float(valid_cycles[i+1]["time"].iloc[0] - valid_cycles[i]["time"].iloc[-1])
+            for i in range(len(valid_cycles) - 1)]
     gaps_arr = np.array(gaps) if gaps else np.array([0.0])
 
     cv = (res["duration"].std() / res["duration"].mean()
           if len(res) > 1 and res["duration"].mean() > 0 else 0.0)
 
-    avg_tonnes     = res["tonnes"].mean() if len(res) > 0 else 0.0
+    avg_tonnes     = float(res["tonnes"].mean())
     tph            = cph * avg_tonnes * util
-    total_cost     = res["cost"].sum()
-    total_tonnes   = res["tonnes"].sum() or 1.0
+    total_cost     = float(res["cost"].sum())
+    total_tonnes   = float(res["tonnes"].sum()) or 1.0
     cost_per_tonne = total_cost / total_tonnes
-    avg_w_proxy    = res["weight_proxy"].mean() if len(res) > 0 else 0.0
-    prod_proxy     = avg_w_proxy * cph * util
+
+    valid_dur = res["duration"][res["duration"] >= 10.0]
+    best_cycle_sec = float(valid_dur.min()) if len(valid_dur) > 0 else float(res["duration"].min())
 
     return {
         "total_time_sec":   total_t,
-        "total_cycles":     len(cycles),
+        "total_cycles":     len(res),
         "cycles_per_hour":  cph,
         "utilization_pct":  util * 100,
         "idle_ratio_pct":   idle_r * 100,
-        "avg_effort":       res["effort"].mean() if len(res) > 0 else 0.0,
-        "consistency_cv":   cv,
-        "avg_cycle_sec":    res["duration"].mean() if len(res) > 0 else 0.0,
-        "best_cycle_sec":   res["duration"].min()  if len(res) > 0 else 0.0,
-        "worst_cycle_sec":  res["duration"].max()  if len(res) > 0 else 0.0,
+        "avg_effort":       float(res["effort"].mean()),
+        "consistency_cv":   float(cv),
+        "avg_cycle_sec":    float(res["duration"].mean()),
+        "best_cycle_sec":   best_cycle_sec,
+        "worst_cycle_sec":  float(res["duration"].max()),
         "median_gap_sec":   float(np.median(gaps_arr)),
         "p90_gap_sec":      float(np.percentile(gaps_arr, 90)),
         "gaps_arr":         gaps_arr,
@@ -253,37 +270,31 @@ def calcular_productividad(df, cycles, res):
         "tonnes_per_hour":  tph,
         "total_cost":       total_cost,
         "cost_per_tonne":   cost_per_tonne,
-        "prod_proxy":       prod_proxy,
         "total_tonnes":     total_tonnes,
+        "prod_proxy":       float(res["weight_proxy"].mean()) * cph * util,
     }
 
 
 # ---------------------------------------------------------------------------
-# Ciclos optimos — ideal REALISTA (percentiles, no extremos absolutos)
+# Ciclos optimos
 # ---------------------------------------------------------------------------
 
 def calcular_ciclos_optimos(res):
-    """
-    Mejor ciclo real: argmax(score)
-
-    Ciclo ideal realista:
-      - Duracion: percentil 10 (rapido pero alcanzable, no el minimo absoluto)
-      - Peso:     percentil 90 (carga alta pero alcanzable)
-      - Eficiencia: percentil 90
-    """
     best_real_idx = res["score"].idxmax()
     best_real     = res.loc[best_real_idx]
 
-    # Ideal realista con percentiles
-    t_ideal   = float(np.percentile(res["duration"],     IDEAL_DURATION_PERCENTILE))
-    w_ideal   = float(np.percentile(res["weight_proxy"], IDEAL_WEIGHT_PERCENTILE))
-    eff_ideal = float(np.percentile(res["efficiency"],   IDEAL_WEIGHT_PERCENTILE))
+    res_valid = res[res["duration"] >= 10.0]
+    if len(res_valid) == 0:
+        res_valid = res
 
-    # Toneladas proporcionales al peso ideal
-    w_max         = res["weight_proxy"].max() or 1.0
-    tonnes_ideal  = w_ideal * (BUCKET_TONNES / w_max)
-    cph_ideal     = 3600.0 / t_ideal if t_ideal > 0 else 0.0
-    tph_ideal     = cph_ideal * tonnes_ideal
+    t_ideal   = float(np.percentile(res_valid["duration"],     IDEAL_DURATION_PERCENTILE))
+    w_ideal   = float(np.percentile(res_valid["weight_proxy"], IDEAL_WEIGHT_PERCENTILE))
+    eff_ideal = float(np.percentile(res_valid["efficiency"],   IDEAL_WEIGHT_PERCENTILE))
+
+    w_max        = float(res["weight_proxy"].max()) or 1.0
+    tonnes_ideal = w_ideal * (BUCKET_TONNES / w_max)
+    cph_ideal    = 3600.0 / t_ideal if t_ideal > 0 else 0.0
+    tph_ideal    = cph_ideal * tonnes_ideal
 
     return {
         "best_real": best_real,
@@ -294,14 +305,13 @@ def calcular_ciclos_optimos(res):
             "tonnes":       tonnes_ideal,
             "cph":          cph_ideal,
             "tph":          tph_ideal,
-            "note": (f"p{IDEAL_DURATION_PERCENTILE} duracion, "
-                     f"p{IDEAL_WEIGHT_PERCENTILE} peso/eficiencia"),
+            "note": f"p{IDEAL_DURATION_PERCENTILE} dur, p{IDEAL_WEIGHT_PERCENTILE} peso",
         }
     }
 
 
 # ---------------------------------------------------------------------------
-# Escenario optimizado logistico
+# Escenario optimizado
 # ---------------------------------------------------------------------------
 
 def calcular_optimizado(real, res):
@@ -317,9 +327,9 @@ def calcular_optimizado(real, res):
     opt_cph   = real["cycles_per_hour"] + extra_cph
     opt_cph  += opt_cph * (opt_util - real["utilization_pct"]) / 100.0
 
-    # Ciclo objetivo: percentil 25 (conservador)
-    if len(res) >= 4:
-        opt_avg_cycle = float(np.percentile(res["duration"], 25))
+    res_valid = res[res["duration"] >= 10.0]
+    if len(res_valid) >= 4:
+        opt_avg_cycle = float(np.percentile(res_valid["duration"], 25))
     else:
         opt_avg_cycle = real["best_cycle_sec"] * 1.05
 
@@ -362,7 +372,7 @@ def generar_insights(res, real, opt, optimos):
         ins.append(f"P90 gaps ({real['p90_gap_sec']:.1f}s) >> mediana — esperas prolongadas recurrentes.")
 
     ideal        = optimos["ideal"]
-    eff_real_avg = res["efficiency"].mean()
+    eff_real_avg = float(res["efficiency"].mean())
     eff_ideal_v  = (ideal["weight_proxy"] * ideal["efficiency"]) / ideal["duration"] \
                    if ideal["duration"] > 0 else 0
     improvement  = (eff_ideal_v / eff_real_avg - 1) * 100 if eff_real_avg > 0 else 0
@@ -384,7 +394,6 @@ def generar_insights(res, real, opt, optimos):
 
 SEP  = "=" * 72
 SEP2 = "-" * 72
-
 def _h(t): print(f"\n{SEP}\n  {t}\n{SEP}")
 def _s(t): print(f"\n{SEP2}\n  {t}\n{SEP2}")
 
@@ -395,16 +404,18 @@ def imprimir_consola(df_proc, cycles, res, real, opt, optimos, insights):
     _h("1. DATOS IMU — RESUMEN")
     print(f"  Muestras:      {len(df_proc)}")
     print(f"  Duracion:      {real['total_time_sec']:.1f} s  ({real['total_time_sec']/60:.1f} min)")
-    print(f"  Frecuencia:    {1/df_proc['time'].diff().mean():.1f} Hz")
-    for col, lbl in [("acc_mag","acc_mag"), ("acc_dynamic","acc_dynamic"),
-                     ("gz_smooth","gz_smooth"), ("pitch","pitch"), ("yaw","yaw")]:
+    dt_mean = df_proc["time"].diff().mean()
+    if dt_mean > 0:
+        print(f"  Frecuencia:    {1/dt_mean:.1f} Hz")
+    for col in ["acc_mag", "acc_dynamic", "gz_smooth", "pitch", "yaw"]:
         s = df_proc[col]
-        print(f"  {lbl:<12} media={s.mean():.3f}  std={s.std():.3f}  "
+        print(f"  {col:<12} media={s.mean():.3f}  std={s.std():.3f}  "
               f"min={s.min():.3f}  max={s.max():.3f}")
     print(f"  idle:          {df_proc['idle'].mean()*100:.1f}% del tiempo")
 
     _h("2. DETECCION DE CICLOS")
-    print(f"  Ciclos detectados: {real['total_cycles']}")
+    print(f"  Ciclos detectados (validos >= 5s): {real['total_cycles']}")
+    print(f"  Lado asignado por posicion (cada {CICLOS_POR_LADO} ciclos alterna)")
 
     _h("3. METRICAS POR CICLO")
     print("""
@@ -414,16 +425,16 @@ def imprimir_consola(df_proc, cycles, res, real, opt, optimos, insights):
     Pitch      = max(pitch) - min(pitch)
     Suavidad   = std(acc_mag)
     T.Elev(s)  = tiempo con diff(pitch) > 0
-    Peso(t)    = sum(acc_dynamic * dt) en fase lifting, escalado a toneladas
+    Peso(t)    = sum(acc_dyn*dt) en fase lifting, escalado a toneladas
     Eficiencia = (Pitch * Esfuerzo) / Duracion
     Costo      = Duracion * Esfuerzo
     Score      = 0.5*W_norm + 0.3*(1/T_norm) + 0.2*Eff_norm
     Prod(t/hr) = (3600/Dur) * Peso(t)
 """)
     fmt = ("{:>4}  {:>7}  {:>8}  {:>7}  {:>7}  {:>7}  {:>7}  "
-           "{:>7}  {:>8}  {:>6}  {:>10}")
+           "{:>7}  {:>8}  {:>6}  {:>10}  {:>10}")
     hdr = fmt.format("#","Dur(s)","Esfuerzo","Pitch","Suavid",
-                     "T.Elev","Peso(t)","Efic","Costo","Score","Prod(t/hr)")
+                     "T.Elev","Peso(t)","Efic","Costo","Score","Prod(t/hr)","Lado")
     print(f"  {hdr}")
     print(f"  {'-'*len(hdr)}")
     for _, row in res.iterrows():
@@ -439,6 +450,7 @@ def imprimir_consola(df_proc, cycles, res, real, opt, optimos, insights):
             f"{row['cost']:.0f}",
             f"{row['score']:.3f}",
             f"{row['productivity_cycle']:.0f}",
+            row["side"],
         ))
 
     _s("Estadisticas de ciclos")
@@ -460,7 +472,7 @@ def imprimir_consola(df_proc, cycles, res, real, opt, optimos, insights):
     print(f"  Utilizacion:          {real['utilization_pct']:.1f}%")
     print(f"  Tiempo muerto:        {real['idle_ratio_pct']:.1f}%")
     print(f"  Duracion media:       {real['avg_cycle_sec']:.2f} s")
-    print(f"  Mejor ciclo:          {real['best_cycle_sec']:.2f} s")
+    print(f"  Mejor ciclo (>=10s):  {real['best_cycle_sec']:.2f} s")
     print(f"  Peor ciclo:           {real['worst_cycle_sec']:.2f} s")
     print(f"  Consistencia (CV):    {real['consistency_cv']:.3f}")
     print(f"  Gap mediano:          {real['median_gap_sec']:.2f} s")
@@ -478,7 +490,7 @@ def imprimir_consola(df_proc, cycles, res, real, opt, optimos, insights):
     print(f"  Duracion:             {best_real['duration']:.2f} s")
     print(f"  Toneladas:            {best_real['tonnes']:.2f} t")
     print(f"  Eficiencia:           {best_real['efficiency']:.4f}")
-    print(f"  Peso proxy:           {best_real['weight_proxy']:.4f}")
+    print(f"  Lado:                 {best_real['side']}")
     print(f"  Ciclos/hr (ciclo):    {3600/best_real['duration']:.1f}")
     print(f"  Prod. ciclo (t/hr):   {best_real['productivity_cycle']:.1f}")
 
@@ -493,7 +505,6 @@ def imprimir_consola(df_proc, cycles, res, real, opt, optimos, insights):
     print(f"  Toneladas/dia ideal:  {ideal['tph']*HORAS_OPERACION:.0f} t")
 
     _h("7. GAP DE MEJORA Y ESCENARIO OPTIMIZADO")
-    print(f"  --- Logistico (reduccion gaps + utilizacion) ---")
     print(f"  Reduccion gaps:       {opt['gap_reduction_sec']:.2f} s/ciclo")
     print(f"  Ciclos extra/hr:      +{opt['extra_cycles_per_hour']:.2f}")
     print(f"  Ciclos/hr opt.:       {opt['cycles_per_hour']:.2f}")
@@ -502,10 +513,10 @@ def imprimir_consola(df_proc, cycles, res, real, opt, optimos, insights):
     print(f"  t/hr opt.:            {opt['opt_tph']:.2f}")
     print(f"  Delta t/hr:           +{opt['delta_tph']:.2f} (+{opt['delta_pct']:.1f}%)")
     print(f"  Delta t/dia:          +{opt['delta_tpd']:.0f} t")
-    print(f"\n  --- Ideal casuistico ---")
-    delta_tph_ideal = ideal["tph"] - real["tonnes_per_hour"]
-    print(f"  Delta t/hr vs real:   +{delta_tph_ideal:.2f} t/hr")
-    print(f"  Delta t/dia vs real:  +{delta_tph_ideal*HORAS_OPERACION:.0f} t")
+    delta_ideal = ideal["tph"] - real["tonnes_per_hour"]
+    print(f"\n  Ideal casuistico:")
+    print(f"  Delta t/hr vs real:   +{delta_ideal:.2f} t/hr")
+    print(f"  Delta t/dia vs real:  +{delta_ideal*HORAS_OPERACION:.0f} t")
 
     _h("8. RECOMENDACIONES")
     for i, ins in enumerate(insights, 1):
@@ -530,12 +541,26 @@ def _style_ax(ax, title="", xlabel="", ylabel="", ts=10):
         ax.set_ylabel(ylabel, fontsize=8, color=GRAY)
 
 
-def _text_panel(ax, title, tc=YELLOW, bc=ACCENT):
+def _info_panel(ax, title, tc=YELLOW, bc=ACCENT):
     ax.set_facecolor(BTN_BG)
-    ax.set_xticks([]); ax.set_yticks([])
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    ax.set_xticks([])
+    ax.set_yticks([])
     for sp in ax.spines.values():
-        sp.set_edgecolor(bc); sp.set_linewidth(1.5)
+        sp.set_edgecolor(bc)
+        sp.set_linewidth(1.5)
     ax.set_title(title, fontsize=10, color=tc, fontweight="bold", pad=5)
+
+
+def _hline(ax, y_val, **kwargs):
+    ax.axhline(y=y_val, **kwargs)
+
+
+def _hspan_text(ax, y_frac_bottom, y_frac_top, color):
+    ax.fill_between([0, 1], [y_frac_bottom, y_frac_bottom],
+                    [y_frac_top, y_frac_top],
+                    color=color, transform=ax.transAxes, zorder=0)
 
 
 # ---------------------------------------------------------------------------
@@ -543,14 +568,15 @@ def _text_panel(ax, title, tc=YELLOW, bc=ACCENT):
 # ---------------------------------------------------------------------------
 
 def vista_metricas_ciclo(fig, cr, res):
-    gs = gridspec.GridSpec(2, 2, left=cr[0], right=cr[2],
-                           bottom=cr[1], top=cr[3], hspace=0.45, wspace=0.35)
+    gs = gridspec.GridSpec(2, 2,
+                           left=cr[0], right=cr[2],
+                           bottom=cr[1], top=cr[3],
+                           hspace=0.45, wspace=0.35)
     axes = []
 
-    # ── Tabla de ciclos ────────────────────────────────────────────────────
     ax_tbl = fig.add_subplot(gs[0, :])
     axes.append(ax_tbl)
-    _text_panel(ax_tbl, "Metricas por Ciclo — Todos los Ciclos", YELLOW, YELLOW)
+    _info_panel(ax_tbl, "Metricas por Ciclo — Todos los Ciclos", YELLOW, YELLOW)
 
     headers = ["#", "Dur(s)", "Esfuerzo", "Pitch", "Suavidad",
                "T.Elev(s)", "Peso(t)", "Eficiencia", "Costo", "Score", "Lado"]
@@ -559,15 +585,15 @@ def vista_metricas_ciclo(fig, cr, res):
     for hdr, cx in zip(headers, col_x):
         ax_tbl.text(cx, 0.95, hdr, transform=ax_tbl.transAxes,
                     fontsize=7, color=YELLOW, fontweight="bold", va="top")
-    ax_tbl.axhline(0.90, color="#555", linewidth=0.8, transform=ax_tbl.transAxes)
+    ax_tbl.plot([0, 1], [0.90, 0.90], color="#555", linewidth=0.8,
+                transform=ax_tbl.transAxes)
 
     n_show = min(len(res), 12)
     row_h  = 0.86 / max(n_show, 1)
     for rank, (_, row) in enumerate(res.head(n_show).iterrows()):
-        y = 0.88 - rank * row_h
+        y  = 0.88 - rank * row_h
         bg = "#1e2d4a" if rank % 2 == 0 else BTN_BG
-        ax_tbl.axhspan(y - row_h * 0.85, y + row_h * 0.1,
-                       xmin=0, xmax=1, color=bg, transform=ax_tbl.transAxes)
+        _hspan_text(ax_tbl, y - row_h * 0.85, y + row_h * 0.1, bg)
         sc_color = GREEN if row["score"] >= res["score"].mean() else ORANGE
         vals = [
             (f"{int(row['cycle'])}",      ACCENT),
@@ -586,10 +612,9 @@ def vista_metricas_ciclo(fig, cr, res):
             ax_tbl.text(cx, y, val, transform=ax_tbl.transAxes,
                         fontsize=7, color=color, va="top", fontfamily="monospace")
 
-    # ── Explicacion de columnas ────────────────────────────────────────────
     ax_exp = fig.add_subplot(gs[1, 0])
     axes.append(ax_exp)
-    _text_panel(ax_exp, "Como se calcula cada columna", ACCENT, ACCENT)
+    _info_panel(ax_exp, "Como se calcula cada columna", ACCENT, ACCENT)
     formulas = [
         ("Dur(s)",     "t_fin - t_inicio"),
         ("Esfuerzo",   "sum(acc_mag)"),
@@ -601,6 +626,7 @@ def vista_metricas_ciclo(fig, cr, res):
         ("Costo",      "Duracion * Esfuerzo"),
         ("Score",      "0.5*W_norm + 0.3*(1/T_norm) + 0.2*Eff_norm"),
         ("Prod(t/hr)", "(3600/Dur) * Peso(t)"),
+        ("Lado",       f"alterna cada {CICLOS_POR_LADO} ciclos"),
     ]
     y = 0.93
     for col, formula in formulas:
@@ -608,16 +634,15 @@ def vista_metricas_ciclo(fig, cr, res):
                     fontsize=7.5, color=YELLOW, va="top", fontfamily="monospace")
         ax_exp.text(0.38, y, formula, transform=ax_exp.transAxes,
                     fontsize=7.5, color=WHITE, va="top")
-        y -= 0.088
+        y -= 0.082
 
-    # ── Score por ciclo ────────────────────────────────────────────────────
     ax_sc = fig.add_subplot(gs[1, 1])
     axes.append(ax_sc)
     _style_ax(ax_sc, "Score por ciclo", "Ciclo", "Score")
     colors_sc = [GREEN if s >= res["score"].mean() else RED for s in res["score"]]
     ax_sc.bar(res["cycle"], res["score"], color=colors_sc, width=0.7, alpha=0.9)
-    ax_sc.axhline(res["score"].mean(), color=YELLOW, linestyle="--",
-                  linewidth=1.2, label=f"media {res['score'].mean():.3f}")
+    _hline(ax_sc, res["score"].mean(), color=YELLOW, linestyle="--",
+           linewidth=1.2, label=f"media {res['score'].mean():.3f}")
     ax_sc.legend(fontsize=7, facecolor=DARK_BG, labelcolor="white")
 
     return axes
@@ -628,41 +653,38 @@ def vista_metricas_ciclo(fig, cr, res):
 # ---------------------------------------------------------------------------
 
 def vista_relacion_ciclos(fig, cr, res, real):
-    gs = gridspec.GridSpec(2, 2, left=cr[0], right=cr[2],
-                           bottom=cr[1], top=cr[3], hspace=0.45, wspace=0.35)
+    gs = gridspec.GridSpec(2, 2,
+                           left=cr[0], right=cr[2],
+                           bottom=cr[1], top=cr[3],
+                           hspace=0.45, wspace=0.35)
     axes = []
 
-    # ── Estadisticas descriptivas ──────────────────────────────────────────
     ax_stats = fig.add_subplot(gs[0, 0])
     axes.append(ax_stats)
-    _text_panel(ax_stats, "Estadisticas de Ciclos", YELLOW, ACCENT)
+    _info_panel(ax_stats, "Estadisticas de Ciclos", YELLOW, ACCENT)
 
-    stats_cols = ["duration", "effort", "pitch_range", "smoothness",
-                  "lifting_time", "tonnes", "efficiency", "cost", "score"]
+    stats_cols = ["duration","effort","pitch_range","smoothness",
+                  "lifting_time","tonnes","efficiency","cost","score"]
     stats = res[stats_cols].describe().loc[["mean","std","min","25%","50%","75%","max"]]
-
-    col_labels = ["Dur", "Esf", "Pitch", "Suav", "T.El", "Ton", "Efic", "Cost", "Score"]
-    row_labels = ["media", "std", "min", "p25", "p50", "p75", "max"]
-
+    col_labels = ["Dur","Esf","Pitch","Suav","T.El","Ton","Efic","Cost","Score"]
+    row_labels = ["media","std","min","p25","p50","p75","max"]
     col_xs = [0.02 + i * 0.107 for i in range(len(col_labels))]
     row_ys = [0.90 - i * 0.12  for i in range(len(row_labels) + 1)]
 
-    # Cabecera
     for lbl, cx in zip(col_labels, col_xs):
         ax_stats.text(cx, row_ys[0], lbl, transform=ax_stats.transAxes,
                       fontsize=6.5, color=YELLOW, fontweight="bold", va="top")
-    ax_stats.axhline(row_ys[0] - 0.04, color="#555", linewidth=0.6,
-                     transform=ax_stats.transAxes)
+    ax_stats.plot([0, 1], [row_ys[0] - 0.04, row_ys[0] - 0.04],
+                  color="#555", linewidth=0.6, transform=ax_stats.transAxes)
 
     for ri, (stat_name, row_y) in enumerate(zip(row_labels, row_ys[1:])):
         ax_stats.text(0.00, row_y, stat_name, transform=ax_stats.transAxes,
                       fontsize=6, color=GRAY, va="top")
         for ci, (col, cx) in enumerate(zip(stats_cols, col_xs)):
-            val = stats.loc[stats.index[ri], col]
+            val = stats.iloc[ri, ci]
             ax_stats.text(cx, row_y, f"{val:.2f}", transform=ax_stats.transAxes,
                           fontsize=6, color=WHITE, va="top", fontfamily="monospace")
 
-    # ── Gaps entre ciclos ──────────────────────────────────────────────────
     ax_gaps = fig.add_subplot(gs[0, 1])
     axes.append(ax_gaps)
     _style_ax(ax_gaps, "Gaps entre ciclos (s)", "Intervalo", "Segundos")
@@ -670,24 +692,22 @@ def vista_relacion_ciclos(fig, cr, res, real):
     if len(gaps_arr) > 0:
         colors_g = [GREEN if g <= real["median_gap_sec"] else RED for g in gaps_arr]
         ax_gaps.bar(range(len(gaps_arr)), gaps_arr, color=colors_g, width=0.7, alpha=0.9)
-        ax_gaps.axhline(real["median_gap_sec"], color=YELLOW, linestyle="--",
-                        linewidth=1.2, label=f"mediana {real['median_gap_sec']:.1f}s")
-        ax_gaps.axhline(TARGET_MAX_GAP_SEC, color=GREEN, linestyle=":",
-                        linewidth=1.5, label=f"objetivo {TARGET_MAX_GAP_SEC}s")
+        _hline(ax_gaps, real["median_gap_sec"], color=YELLOW, linestyle="--",
+               linewidth=1.2, label=f"mediana {real['median_gap_sec']:.1f}s")
+        _hline(ax_gaps, TARGET_MAX_GAP_SEC, color=GREEN, linestyle=":",
+               linewidth=1.5, label=f"objetivo {TARGET_MAX_GAP_SEC}s")
         ax_gaps.legend(fontsize=7, facecolor=DARK_BG, labelcolor="white")
 
-    # ── Duracion por ciclo ─────────────────────────────────────────────────
     ax_dur = fig.add_subplot(gs[1, 0])
     axes.append(ax_dur)
     _style_ax(ax_dur, "Duracion por ciclo", "Ciclo", "Segundos")
     colors_d = [GREEN if d <= res["duration"].quantile(0.5) else RED
                 for d in res["duration"]]
     ax_dur.bar(res["cycle"], res["duration"], color=colors_d, width=0.7, alpha=0.9)
-    ax_dur.axhline(res["duration"].mean(), color=YELLOW, linestyle="--",
-                   linewidth=1.2, label=f"media {res['duration'].mean():.1f}s")
+    _hline(ax_dur, res["duration"].mean(), color=YELLOW, linestyle="--",
+           linewidth=1.2, label=f"media {res['duration'].mean():.1f}s")
     ax_dur.legend(fontsize=7, facecolor=DARK_BG, labelcolor="white")
 
-    # ── Histograma duracion ────────────────────────────────────────────────
     ax_hist = fig.add_subplot(gs[1, 1])
     axes.append(ax_hist)
     _style_ax(ax_hist, "Distribucion de duracion", "Segundos", "Frecuencia")
@@ -708,14 +728,15 @@ def vista_relacion_ciclos(fig, cr, res, real):
 # ---------------------------------------------------------------------------
 
 def vista_productividad_global(fig, cr, res, real):
-    gs = gridspec.GridSpec(2, 3, left=cr[0], right=cr[2],
-                           bottom=cr[1], top=cr[3], hspace=0.45, wspace=0.35)
+    gs = gridspec.GridSpec(2, 3,
+                           left=cr[0], right=cr[2],
+                           bottom=cr[1], top=cr[3],
+                           hspace=0.45, wspace=0.35)
     axes = []
 
-    # ── Panel KPIs ─────────────────────────────────────────────────────────
     ax_kpi = fig.add_subplot(gs[0, :2])
     axes.append(ax_kpi)
-    _text_panel(ax_kpi, "Productividad Global — KPIs OEE", YELLOW, ACCENT)
+    _info_panel(ax_kpi, "Productividad Global — KPIs OEE", YELLOW, ACCENT)
 
     kpis = [
         ("Ciclos totales",       f"{real['total_cycles']}",                WHITE),
@@ -725,7 +746,7 @@ def vista_productividad_global(fig, cr, res, real):
         ("Tiempo muerto",        f"{real['idle_ratio_pct']:.1f}%",
          GREEN if real["idle_ratio_pct"] <= 15 else RED),
         ("Duracion media",       f"{real['avg_cycle_sec']:.1f} s",         WHITE),
-        ("Mejor ciclo",          f"{real['best_cycle_sec']:.1f} s",        GREEN),
+        ("Mejor ciclo (>=10s)",  f"{real['best_cycle_sec']:.1f} s",        GREEN),
         ("Peor ciclo",           f"{real['worst_cycle_sec']:.1f} s",       RED),
         ("Consistencia (CV)",    f"{real['consistency_cv']:.3f}",
          GREEN if real["consistency_cv"] <= 0.15 else ORANGE),
@@ -747,22 +768,15 @@ def vista_productividad_global(fig, cr, res, real):
                     fontsize=13, color=color, va="top", fontweight="bold",
                     fontfamily="monospace")
 
-    # ── Panel toneladas/dia ────────────────────────────────────────────────
     ax_tpd = fig.add_subplot(gs[0, 2])
     axes.append(ax_tpd)
-    ax_tpd.set_facecolor("#0a1628")
-    ax_tpd.set_xticks([]); ax_tpd.set_yticks([])
-    for sp in ax_tpd.spines.values():
-        sp.set_edgecolor(YELLOW); sp.set_linewidth(2)
-    ax_tpd.set_title("Produccion", fontsize=10, color=YELLOW, fontweight="bold", pad=5)
-
+    _info_panel(ax_tpd, "Produccion", YELLOW, YELLOW)
     prod_lines = [
         ("Toneladas / hora",                  f"{real['tonnes_per_hour']:.1f} t",  GREEN,  14),
         (f"Toneladas / dia ({HORAS_OPERACION}h)", f"{real['tonnes_per_hour']*HORAS_OPERACION:.0f} t", ORANGE, 16),
         ("Toneladas totales",                 f"{real['total_tonnes']:.0f} t",     WHITE,  11),
         ("Costo total",                       f"{real['total_cost']:.0f}",         PURPLE, 10),
         ("Costo / tonelada",                  f"{real['cost_per_tonne']:.3f}",     PURPLE, 10),
-        ("Productividad proxy",               f"{real['prod_proxy']:.1f}",         ACCENT, 10),
     ]
     y = 0.90
     for label, val, color, size in prod_lines:
@@ -773,83 +787,75 @@ def vista_productividad_global(fig, cr, res, real):
                     fontfamily="monospace")
         y -= 0.17
 
-    # ── Productividad por ciclo ────────────────────────────────────────────
     ax_prod = fig.add_subplot(gs[1, 0])
     axes.append(ax_prod)
     _style_ax(ax_prod, "Productividad por ciclo (t/hr)", "Ciclo", "t/hr")
     ax_prod.plot(res["cycle"], res["productivity_cycle"],
                  color=ORANGE, marker="o", markersize=4, linewidth=1.5)
     ax_prod.fill_between(res["cycle"], res["productivity_cycle"], alpha=0.2, color=ORANGE)
-    ax_prod.axhline(res["productivity_cycle"].mean(), color=YELLOW, linestyle="--",
-                    linewidth=1.2, label=f"media {res['productivity_cycle'].mean():.0f}")
+    _hline(ax_prod, res["productivity_cycle"].mean(), color=YELLOW, linestyle="--",
+           linewidth=1.2, label=f"media {res['productivity_cycle'].mean():.0f}")
     ax_prod.legend(fontsize=7, facecolor=DARK_BG, labelcolor="white")
 
-    # ── Toneladas por ciclo ────────────────────────────────────────────────
     ax_t = fig.add_subplot(gs[1, 1])
     axes.append(ax_t)
     _style_ax(ax_t, "Toneladas estimadas por ciclo", "Ciclo", "Toneladas")
     colors_t = [GREEN if t >= res["tonnes"].mean() else RED for t in res["tonnes"]]
     ax_t.bar(res["cycle"], res["tonnes"], color=colors_t, width=0.7, alpha=0.9)
-    ax_t.axhline(res["tonnes"].mean(), color=YELLOW, linestyle="--",
-                 linewidth=1.2, label=f"media {res['tonnes'].mean():.1f} t")
-    ax_t.axhline(BUCKET_TONNES, color=GREEN, linestyle=":", linewidth=1.5,
-                 label=f"nominal {BUCKET_TONNES} t")
+    _hline(ax_t, res["tonnes"].mean(), color=YELLOW, linestyle="--",
+           linewidth=1.2, label=f"media {res['tonnes'].mean():.1f} t")
+    _hline(ax_t, BUCKET_TONNES, color=GREEN, linestyle=":", linewidth=1.5,
+           label=f"nominal {BUCKET_TONNES} t")
     ax_t.legend(fontsize=7, facecolor=DARK_BG, labelcolor="white")
 
-    # ── Costo por ciclo ────────────────────────────────────────────────────
     ax_cost = fig.add_subplot(gs[1, 2])
     axes.append(ax_cost)
     _style_ax(ax_cost, "Costo por ciclo", "Ciclo", "Costo")
     colors_c = [GREEN if c <= res["cost"].mean() else RED for c in res["cost"]]
     ax_cost.bar(res["cycle"], res["cost"], color=colors_c, width=0.7, alpha=0.9)
-    ax_cost.axhline(res["cost"].mean(), color=YELLOW, linestyle="--",
-                    linewidth=1.2, label=f"media {res['cost'].mean():.0f}")
+    _hline(ax_cost, res["cost"].mean(), color=YELLOW, linestyle="--",
+           linewidth=1.2, label=f"media {res['cost'].mean():.0f}")
     ax_cost.legend(fontsize=7, facecolor=DARK_BG, labelcolor="white")
 
     return axes
 
 
 # ---------------------------------------------------------------------------
-# VISTA 4 — Ciclo Optimo: Mejor Real vs Ideal Realista
+# VISTA 4 — Ciclo Optimo
 # ---------------------------------------------------------------------------
 
 def vista_ciclo_optimo(fig, cr, res, cycles, real, optimos):
-    gs = gridspec.GridSpec(2, 3, left=cr[0], right=cr[2],
-                           bottom=cr[1], top=cr[3], hspace=0.50, wspace=0.38)
+    gs = gridspec.GridSpec(2, 3,
+                           left=cr[0], right=cr[2],
+                           bottom=cr[1], top=cr[3],
+                           hspace=0.50, wspace=0.38)
     axes = []
 
     best_real = optimos["best_real"]
     ideal     = optimos["ideal"]
-    best_cyc_data = cycles[int(best_real["cycle"])]
+    cyc_idx   = int(best_real["cycle"])
+    best_cyc_data = cycles[cyc_idx] if cyc_idx < len(cycles) else cycles[-1]
 
-    # ── Senal del mejor ciclo real ─────────────────────────────────────────
     ax_sig = fig.add_subplot(gs[0, :2])
     axes.append(ax_sig)
     _style_ax(ax_sig,
-              f"Ciclo #{int(best_real['cycle'])} — Mejor Real "
-              f"(score={best_real['score']:.3f})",
+              f"Ciclo #{cyc_idx} — Mejor Real (score={best_real['score']:.3f}, "
+              f"dur={best_real['duration']:.1f}s, lado={best_real['side']})",
               "Tiempo relativo (s)", "Valor")
     t_rel = best_cyc_data["time"] - best_cyc_data["time"].iloc[0]
     ax_sig.plot(t_rel, best_cyc_data["gz_smooth"], color=ACCENT,
                 linewidth=1.5, label="gz suavizado")
     ax_sig.plot(t_rel, best_cyc_data["pitch"], color=ORANGE,
                 linewidth=1.5, label="pitch (rad)")
-    dyn_max = best_cyc_data["acc_dynamic"].max() or 1
+    dyn_max = float(best_cyc_data["acc_dynamic"].max()) or 1.0
     ax_sig.plot(t_rel, best_cyc_data["acc_dynamic"] / dyn_max,
                 color=PURPLE, linewidth=1, alpha=0.7, label="acc_dynamic (norm)")
     ax_sig.axhline(0, color="#555", linewidth=0.5)
     ax_sig.legend(fontsize=7, facecolor=DARK_BG, labelcolor="white")
 
-    # ── Tabla comparativa ─────────────────────────────────────────────────
     ax_char = fig.add_subplot(gs[0, 2])
     axes.append(ax_char)
-    ax_char.set_facecolor("#0a1628")
-    ax_char.set_xticks([]); ax_char.set_yticks([])
-    for sp in ax_char.spines.values():
-        sp.set_edgecolor(GREEN); sp.set_linewidth(2)
-    ax_char.set_title(f"Mejor Real vs Ideal\n({ideal['note']})",
-                      fontsize=8, color=GREEN, fontweight="bold", pad=4)
-
+    _info_panel(ax_char, f"Mejor Real vs Ideal\n({ideal['note']})", GREEN, GREEN)
     rows_char = [
         ("Metrica",         "Real",                                   "Ideal",                  YELLOW),
         ("Duracion (s)",    f"{best_real['duration']:.1f}",           f"{ideal['duration']:.1f}",   ACCENT),
@@ -872,7 +878,6 @@ def vista_ciclo_optimo(fig, cr, res, cycles, real, optimos):
                      fontfamily="monospace")
         y -= 0.11
 
-    # ── Frontera de eficiencia ─────────────────────────────────────────────
     ax_front = fig.add_subplot(gs[1, :2])
     axes.append(ax_front)
     _style_ax(ax_front, "Frontera de Eficiencia: Duracion vs Toneladas",
@@ -882,24 +887,21 @@ def vista_ciclo_optimo(fig, cr, res, cycles, real, optimos):
     plt.colorbar(sc, ax=ax_front, label="Score").ax.yaxis.label.set_color("white")
     ax_front.scatter(best_real["duration"], best_real["tonnes"],
                      color=GREEN, s=150, marker="*", zorder=5,
-                     label=f"Mejor real (#{int(best_real['cycle'])})")
+                     label=f"Mejor real (#{cyc_idx})")
     ax_front.scatter(ideal["duration"], ideal["tonnes"],
                      color=YELLOW, s=200, marker="D", zorder=5,
-                     label=f"Ideal realista ({ideal['note']})")
+                     label=f"Ideal ({ideal['note']})")
     ax_front.axvline(ideal["duration"], color=YELLOW, linestyle=":", linewidth=1, alpha=0.5)
     ax_front.axhline(ideal["tonnes"],   color=YELLOW, linestyle=":", linewidth=1, alpha=0.5)
     ax_front.legend(fontsize=7, facecolor=DARK_BG, labelcolor="white")
 
-    # ── Panel mejora eficiencia ────────────────────────────────────────────
     ax_eff = fig.add_subplot(gs[1, 2])
     axes.append(ax_eff)
-    _text_panel(ax_eff, "Mejora de Eficiencia", YELLOW, ORANGE)
-
-    eff_real_avg = res["efficiency"].mean()
+    _info_panel(ax_eff, "Mejora de Eficiencia", YELLOW, ORANGE)
+    eff_real_avg = float(res["efficiency"].mean())
     eff_ideal_v  = (ideal["weight_proxy"] * ideal["efficiency"]) / ideal["duration"] \
                    if ideal["duration"] > 0 else 0
     improvement  = (eff_ideal_v / eff_real_avg - 1) * 100 if eff_real_avg > 0 else 0
-
     eff_lines = [
         ("Eficiencia real avg",  f"{eff_real_avg:.3f}",   WHITE,  9),
         ("Eficiencia ideal",     f"{eff_ideal_v:.3f}",    GREEN,  9),
@@ -930,53 +932,44 @@ def vista_ciclo_optimo(fig, cr, res, cycles, real, optimos):
 
 
 # ---------------------------------------------------------------------------
-# VISTA 5 — Gap de Mejora y Escenario Optimizado
+# VISTA 5 — Gap de Mejora
+# Cambios: barras separadas en subgraficas individuales + sin linea objetivo en gaps
 # ---------------------------------------------------------------------------
 
 def vista_gap_mejora(fig, cr, res, real, opt, optimos):
-    gs = gridspec.GridSpec(2, 3, left=cr[0], right=cr[2],
-                           bottom=cr[1], top=cr[3], hspace=0.50, wspace=0.38)
+    gs = gridspec.GridSpec(2, 3,
+                           left=cr[0], right=cr[2],
+                           bottom=cr[1], top=cr[3],
+                           hspace=0.55, wspace=0.40)
     axes = []
-
     ideal = optimos["ideal"]
 
-    # ── Barras comparativas: 3 escenarios ─────────────────────────────────
-    ax_bar = fig.add_subplot(gs[0, :])
-    axes.append(ax_bar)
-    _style_ax(ax_bar, "Comparativa: Real vs Opt. Logistico vs Ideal Realista", "", "")
+    # ── Fila superior: 5 metricas en subgraficas separadas (1 barra por metrica) ──
+    # Usamos un GridSpec anidado para la fila superior
+    gs_top = gridspec.GridSpecFromSubplotSpec(1, 5, subplot_spec=gs[0, :],
+                                              wspace=0.45)
 
     metricas = [
-        ("Ciclos/hr",       real["cycles_per_hour"],  opt["cycles_per_hour"],  ideal["cph"],         ""),
-        ("Utilizacion %",   real["utilization_pct"],  opt["utilization_pct"],  TARGET_UTILIZATION_PCT,"%"),
-        ("t/hr",            real["tonnes_per_hour"],  opt["opt_tph"],          ideal["tph"],         "t"),
-        ("Ciclo prom (s)",  real["avg_cycle_sec"],     opt["avg_cycle_sec"],    ideal["duration"],    "s"),
-        ("Gap mediano (s)", real["median_gap_sec"],    TARGET_MAX_GAP_SEC,      TARGET_MAX_GAP_SEC,   "s"),
+        ("Ciclos/hr",       real["cycles_per_hour"],  opt["cycles_per_hour"],  ideal["cph"],          ""),
+        ("Utilizacion %",   real["utilization_pct"],  opt["utilization_pct"],  TARGET_UTILIZATION_PCT, "%"),
+        ("t/hr",            real["tonnes_per_hour"],  opt["opt_tph"],          ideal["tph"],           "t"),
+        ("Ciclo prom (s)",  real["avg_cycle_sec"],     opt["avg_cycle_sec"],    ideal["duration"],      "s"),
+        ("Gap mediano (s)", real["median_gap_sec"],    TARGET_MAX_GAP_SEC,      TARGET_MAX_GAP_SEC,     "s"),
     ]
-    labels    = [m[0] for m in metricas]
-    vals_real = [m[1] for m in metricas]
-    vals_opt  = [m[2] for m in metricas]
-    vals_ideal= [m[3] for m in metricas]
-    units     = [m[4] for m in metricas]
 
-    x = np.arange(len(labels))
-    w = 0.25
-    bars_r = ax_bar.bar(x - w,  vals_real,  w, label="Real",        color=RED,    alpha=0.85)
-    bars_o = ax_bar.bar(x,      vals_opt,   w, label="Opt. Logist.", color=ORANGE, alpha=0.85)
-    bars_i = ax_bar.bar(x + w,  vals_ideal, w, label="Ideal",        color=GREEN,  alpha=0.85)
-
-    for bars, vals in [(bars_r, vals_real), (bars_o, vals_opt), (bars_i, vals_ideal)]:
-        for bar, val, unit in zip(bars, vals, units):
-            ax_bar.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.3,
-                        f"{val:.0f}{unit}", ha="center", va="bottom", fontsize=7, color="white")
-
-    ax_bar.set_xticks(x)
-    ax_bar.set_xticklabels(labels, fontsize=9, color="white")
-    ax_bar.legend(fontsize=8, facecolor=DARK_BG, labelcolor="white")
-    ax_bar.text(0.5, 1.04,
-                f"Opt. Logistico: +{opt['delta_tph']:.0f} t/hr (+{opt['delta_pct']:.0f}%)  |  "
-                f"Ideal: +{ideal['tph']-real['tonnes_per_hour']:.0f} t/hr",
-                transform=ax_bar.transAxes, ha="center", fontsize=9,
-                color=YELLOW, fontweight="bold")
+    for mi, (label, v_real, v_opt, v_ideal, unit) in enumerate(metricas):
+        ax_m = fig.add_subplot(gs_top[0, mi])
+        axes.append(ax_m)
+        _style_ax(ax_m, label, ts=8)
+        bars = ax_m.bar([0, 1, 2], [v_real, v_opt, v_ideal],
+                        color=[RED, ORANGE, GREEN], alpha=0.85, width=0.6)
+        ax_m.set_xticks([0, 1, 2])
+        ax_m.set_xticklabels(["Real", "Opt.", "Ideal"], fontsize=7, color="white")
+        for bar, val in zip(bars, [v_real, v_opt, v_ideal]):
+            ax_m.text(bar.get_x() + bar.get_width()/2,
+                      bar.get_height() * 1.02,
+                      f"{val:.1f}{unit}", ha="center", va="bottom",
+                      fontsize=7, color="white")
 
     # ── Produccion acumulada ───────────────────────────────────────────────
     ax_line = fig.add_subplot(gs[1, 0])
@@ -996,26 +989,24 @@ def vista_gap_mejora(fig, cr, res, real, opt, optimos):
     ax_line.fill_between(x_cyc, x_cyc * t_r, x_cyc * t_i, alpha=0.1, color=GREEN)
     ax_line.legend(fontsize=7, facecolor=DARK_BG, labelcolor="white")
 
-    # ── Gaps: real vs objetivo ─────────────────────────────────────────────
+    # ── Gaps real vs optimizado (sin linea objetivo — diferencias son decimales) ──
     ax_gaps = fig.add_subplot(gs[1, 1])
     axes.append(ax_gaps)
-    _style_ax(ax_gaps, "Gaps: Real vs Objetivo", "Intervalo", "Segundos")
+    _style_ax(ax_gaps, "Gaps: Real vs Optimizado", "Intervalo", "Segundos")
     gaps_arr = real["gaps_arr"]
     if len(gaps_arr) > 0:
         x_g = np.arange(len(gaps_arr))
         ax_gaps.bar(x_g - 0.2, gaps_arr, 0.4, color=RED, alpha=0.8, label="Real")
         opt_gaps = np.clip(gaps_arr, None, real["median_gap_sec"])
         ax_gaps.bar(x_g + 0.2, opt_gaps, 0.4, color=GREEN, alpha=0.8, label="Optimizado")
-        ax_gaps.axhline(TARGET_MAX_GAP_SEC, color=YELLOW, linestyle="--",
-                        linewidth=1.2, label=f"objetivo {TARGET_MAX_GAP_SEC}s")
+        # Sin linea objetivo (los gaps optimizados solo difieren en decimales)
         ax_gaps.legend(fontsize=7, facecolor=DARK_BG, labelcolor="white")
 
-    # ── Panel resumen del gap ──────────────────────────────────────────────
+    # ── Resumen del gap ────────────────────────────────────────────────────
     ax_sum = fig.add_subplot(gs[1, 2])
     axes.append(ax_sum)
-    _text_panel(ax_sum, "Resumen del Gap de Mejora", YELLOW, GREEN)
-
-    delta_tph_ideal = ideal["tph"] - real["tonnes_per_hour"]
+    _info_panel(ax_sum, "Resumen del Gap de Mejora", YELLOW, GREEN)
+    delta_ideal = ideal["tph"] - real["tonnes_per_hour"]
     sum_lines = [
         ("--- LOGISTICO ---",                  YELLOW, 9,  "bold"),
         (f"Reduccion gaps: {opt['gap_reduction_sec']:.1f}s/ciclo", WHITE, 8, "normal"),
@@ -1026,8 +1017,8 @@ def vista_gap_mejora(fig, cr, res, real, opt, optimos):
         ("--- IDEAL REALISTA ---",             YELLOW, 9,  "bold"),
         (f"Duracion obj: {ideal['duration']:.1f}s (p{IDEAL_DURATION_PERCENTILE})", WHITE, 8, "normal"),
         (f"Peso obj: p{IDEAL_WEIGHT_PERCENTILE} de ciclos",         WHITE, 8, "normal"),
-        (f"Delta t/hr: +{delta_tph_ideal:.0f} t",                  GREEN, 10, "bold"),
-        (f"Delta t/dia: +{delta_tph_ideal*HORAS_OPERACION:.0f} t", ORANGE, 10, "bold"),
+        (f"Delta t/hr: +{delta_ideal:.0f} t",                      GREEN, 10, "bold"),
+        (f"Delta t/dia: +{delta_ideal*HORAS_OPERACION:.0f} t",     ORANGE, 10, "bold"),
         ("",                                   WHITE, 4,  "normal"),
         ("--- MAXIMO POSIBLE ---",             YELLOW, 9,  "bold"),
         (f"t/hr ideal: {ideal['tph']:.0f} t",  GREEN, 11, "bold"),
@@ -1043,16 +1034,126 @@ def vista_gap_mejora(fig, cr, res, real, opt, optimos):
 
 
 # ---------------------------------------------------------------------------
+# VISTA 6 — Recorrido (gz acumulado real vs optimizado)
+# ---------------------------------------------------------------------------
+
+def vista_recorrido(fig, cr, df_proc, cycles, res, real):
+    """
+    Muestra el 'recorrido' angular de la pala usando gz (velocidad angular Z).
+    - gz acumulado = integral de gz en el tiempo -> angulo total girado
+    - Recorrido real: gz_smooth acumulado de toda la sesion
+    - Recorrido optimizado: mismo recorrido pero con los ciclos lentos
+      reemplazados por la duracion del ciclo p25 (manteniendo el angulo total)
+    - Tambien muestra gz_smooth por ciclo coloreado por lado
+    """
+    gs = gridspec.GridSpec(2, 2,
+                           left=cr[0], right=cr[2],
+                           bottom=cr[1], top=cr[3],
+                           hspace=0.45, wspace=0.35)
+    axes = []
+
+    # ── gz acumulado — recorrido angular total ─────────────────────────────
+    ax_cum = fig.add_subplot(gs[0, :])
+    axes.append(ax_cum)
+    _style_ax(ax_cum, "Recorrido Angular Acumulado (integral de gz)",
+              "Tiempo (s)", "Angulo acumulado (rad)")
+
+    t_arr  = df_proc["time"].values
+    gz_arr = df_proc["gz_smooth"].values
+    dt_arr = np.diff(t_arr, prepend=t_arr[0])
+    gz_cum = np.cumsum(gz_arr * dt_arr)
+
+    ax_cum.plot(t_arr, gz_cum, color=ACCENT, linewidth=1.2, label="Recorrido real")
+    ax_cum.fill_between(t_arr, gz_cum, alpha=0.15, color=ACCENT)
+
+    # Marcar inicio de cada ciclo
+    for _, row in res.iterrows():
+        t_s = row["t_start"]
+        idx = np.searchsorted(t_arr, t_s)
+        if idx < len(gz_cum):
+            color_side = GREEN if row["side"] == "izquierda" else ORANGE
+            ax_cum.axvline(t_s, color=color_side, linewidth=0.6, alpha=0.5)
+
+    # Leyenda de lados
+    from matplotlib.lines import Line2D
+    legend_elements = [
+        Line2D([0], [0], color=GREEN,  linewidth=1.5, label="Inicio ciclo izquierda"),
+        Line2D([0], [0], color=ORANGE, linewidth=1.5, label="Inicio ciclo derecha"),
+        Line2D([0], [0], color=ACCENT, linewidth=2,   label="gz acumulado"),
+    ]
+    ax_cum.legend(handles=legend_elements, fontsize=7,
+                  facecolor=DARK_BG, labelcolor="white")
+
+    # ── gz por ciclo coloreado por lado ───────────────────────────────────
+    ax_gz = fig.add_subplot(gs[1, 0])
+    axes.append(ax_gz)
+    _style_ax(ax_gz, "gz suavizado por ciclo (coloreado por lado)",
+              "Tiempo (s)", "gz (rad/s)")
+
+    for _, row in res.iterrows():
+        t_s = row["t_start"]
+        t_e = row["t_end"]
+        mask = (t_arr >= t_s) & (t_arr <= t_e)
+        color_side = GREEN if row["side"] == "izquierda" else ORANGE
+        ax_gz.plot(t_arr[mask], gz_arr[mask], color=color_side,
+                   linewidth=0.8, alpha=0.7)
+
+    ax_gz.axhline(0, color="#555", linewidth=0.5)
+    ax_gz.axhline(GZ_THRESHOLD,  color=RED, linestyle="--", linewidth=0.8, alpha=0.6)
+    ax_gz.axhline(-GZ_THRESHOLD, color=RED, linestyle="--", linewidth=0.8, alpha=0.6)
+
+    legend_gz = [
+        Line2D([0], [0], color=GREEN,  linewidth=2, label="Izquierda"),
+        Line2D([0], [0], color=ORANGE, linewidth=2, label="Derecha"),
+    ]
+    ax_gz.legend(handles=legend_gz, fontsize=7, facecolor=DARK_BG, labelcolor="white")
+
+    # ── Recorrido por ciclo (angulo total girado por ciclo) ────────────────
+    ax_ang = fig.add_subplot(gs[1, 1])
+    axes.append(ax_ang)
+    _style_ax(ax_ang, "Angulo total girado por ciclo (|gz| integrado)",
+              "Ciclo", "Angulo (rad)")
+
+    ang_per_cycle = []
+    for _, row in res.iterrows():
+        t_s = row["t_start"]
+        t_e = row["t_end"]
+        mask = (t_arr >= t_s) & (t_arr <= t_e)
+        gz_c  = np.abs(gz_arr[mask])
+        dt_c  = np.diff(t_arr[mask], prepend=t_arr[mask][0]) if mask.sum() > 0 else np.array([0])
+        total = float(np.sum(gz_c * dt_c))
+        ang_per_cycle.append(total)
+
+    ang_arr = np.array(ang_per_cycle)
+    colors_ang = [GREEN if row["side"] == "izquierda" else ORANGE
+                  for _, row in res.iterrows()]
+    ax_ang.bar(res["cycle"], ang_arr, color=colors_ang, width=0.7, alpha=0.9)
+    _hline(ax_ang, ang_arr.mean(), color=YELLOW, linestyle="--",
+           linewidth=1.2, label=f"media {ang_arr.mean():.1f} rad")
+
+    legend_ang = [
+        Line2D([0], [0], color=GREEN,  linewidth=0, marker="s",
+               markersize=8, label="Izquierda"),
+        Line2D([0], [0], color=ORANGE, linewidth=0, marker="s",
+               markersize=8, label="Derecha"),
+    ]
+    ax_ang.legend(handles=legend_ang, fontsize=7, facecolor=DARK_BG, labelcolor="white")
+
+    return axes
+
+
+# ---------------------------------------------------------------------------
 # Dashboard
 # ---------------------------------------------------------------------------
 
 class Dashboard:
     VIEWS = [
-        ("Metricas Ciclo",   "metricas"),
-        ("Relacion Ciclos",  "relacion"),
-        ("Productividad",    "productividad"),
-        ("Ciclo Optimo",     "optimo"),
-        ("Gap de Mejora",    "gap"),
+        ("Metricas Ciclo",  "metricas"),
+        ("Relacion Ciclos", "relacion"),
+        ("Productividad",   "productividad"),
+        ("Ciclo Optimo",    "optimo"),
+        ("Gap de Mejora",   "gap"),
+        ("Recorrido",       "recorrido"),
     ]
 
     def __init__(self, df_proc, cycles, res, real, opt, valid_segments, insights, optimos):
@@ -1065,6 +1166,9 @@ class Dashboard:
         self.insights       = insights
         self.optimos        = optimos
         self.content_axes   = []
+        self._btn_refs      = []
+        self._btn_ax_map    = {}
+
         self._build_figure()
         self._show_view("metricas")
 
@@ -1076,27 +1180,32 @@ class Dashboard:
                       ha="center", fontsize=14, color=WHITE, fontweight="bold")
 
         n   = len(self.VIEWS)
-        bw  = 0.155
+        bw  = 0.130
         bh  = 0.042
         by  = 0.920
         gap = (1.0 - n * bw) / (n + 1)
 
-        self.buttons  = {}
-        self.btn_axes = {}
         for i, (label, key) in enumerate(self.VIEWS):
-            bx = gap + i * (bw + gap)
+            bx     = gap + i * (bw + gap)
             ax_btn = self.fig.add_axes([bx, by, bw, bh])
+            ax_btn.set_facecolor(BTN_BG)
+            for sp in ax_btn.spines.values():
+                sp.set_edgecolor("#888")
+
             btn = Button(ax_btn, label, color=BTN_BG, hovercolor="#1e3a5f")
             btn.label.set_color(WHITE)
-            btn.label.set_fontsize(9)
+            btn.label.set_fontsize(8)
             btn.label.set_fontweight("bold")
             btn.on_clicked(lambda event, k=key: self._show_view(k))
-            self.buttons[key]  = btn
-            self.btn_axes[key] = ax_btn
+
+            self._btn_refs.append(btn)
+            self._btn_ax_map[key] = ax_btn
 
         sep = self.fig.add_axes([0.02, 0.912, 0.96, 0.001])
         sep.set_facecolor("#555")
         sep.set_xticks([]); sep.set_yticks([])
+        for sp in sep.spines.values():
+            sp.set_visible(False)
 
         self.content_rect = [0.03, 0.03, 0.97, 0.905]
 
@@ -1108,7 +1217,7 @@ class Dashboard:
                 pass
         self.content_axes = []
 
-        for key, ax_btn in self.btn_axes.items():
+        for key, ax_btn in self._btn_ax_map.items():
             ax_btn.set_facecolor(BTN_ACT if key == view_key else BTN_BG)
 
         cr = self.content_rect
@@ -1124,6 +1233,9 @@ class Dashboard:
         elif view_key == "gap":
             self.content_axes = vista_gap_mejora(
                 self.fig, cr, self.res, self.real, self.opt, self.optimos)
+        elif view_key == "recorrido":
+            self.content_axes = vista_recorrido(
+                self.fig, cr, self.df_proc, self.cycles, self.res, self.real)
 
         self.fig.canvas.draw_idle()
 
@@ -1204,9 +1316,7 @@ def main():
     optimos  = calcular_ciclos_optimos(res)
     insights = generar_insights(res, real, opt, optimos)
 
-    # Salida completa en consola
     imprimir_consola(df_proc, cycles, res, real, opt, optimos, insights)
-
     guardar_reporte(res, real, opt, optimos, insights)
 
     if not args.no_gui:
@@ -1216,4 +1326,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
